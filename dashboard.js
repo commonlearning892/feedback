@@ -296,18 +296,12 @@ function initGlobalBranchSelector(data) {
             console.log('🔵 About to call renderAllSections...');
             renderAllSections(view);
             console.log('🔵 Finished renderAllSections, now calling renderComparison...');
-            // Auto-enable Segment comparison for simplicity
-            const cmp = document.getElementById('compareBySelect');
-            if (cmp) {
-                cmp.value = 'segment';
-                cmp.dispatchEvent(new Event('change'));
-            } else {
-                renderComparison(view);
-            }
+            renderComparison(view);
             sanitizeDisplayedText();
             console.log('🔵 Render complete for branch:', CURRENT_BRANCH || 'All Branches');
         });
-    } else {
+    }
+ else {
         console.log('⚠️ Branch selector already wired, skipping');
     }
     // Default remains "All Branches" (no auto-select)
@@ -1612,6 +1606,10 @@ function renderEnvironmentSection(data) {
             const low = String(k).toLowerCase();
             if (low.includes('hygiene') || low.includes('clean')) { hygiene = v?.average ?? hygiene; }
         }
+        if (hygiene == null) {
+            const vals = Object.values(infra).map(o => o?.average).filter(x => x!=null && !isNaN(x));
+            if (vals.length) hygiene = vals.reduce((a,b)=>a+b,0)/vals.length;
+        }
     }
     if (safety == null) {
         // Fallback to overall average of Environment Quality if explicit Safety not found
@@ -1706,6 +1704,7 @@ function renderInfrastructureSection(data) {
     if (container) {
         console.log('🏗️ Rendering heatmap, branch_performance:', Object.keys(data.branch_performance || {}));
         const branches = data.branch_performance || {};
+        const brRatingCounts = (data.branch_rating_counts || RAW_DATA?.branch_rating_counts || {});
         const rows = Object.entries(branches).map(([b, v]) => ({
             Branch: b,
             Academics: v.subject_avg,
@@ -1714,13 +1713,44 @@ function renderInfrastructureSection(data) {
             Administration: v.admin_avg
         }));
         rows.sort((a,b)=> (a.Infrastructure??0) - (b.Infrastructure??0));
-        const makeCell = (val) => {
-            const v = val==null || isNaN(val) ? 0 : val;
-            const pct = v/5; const red = Math.round((1-pct)*255); const green = Math.round(pct*180);
-            return `<td style="background: rgb(${red},${green},80); color:#fff; text-align:center; padding:8px;">${v? v.toFixed(2):'-'}</td>`;
+        const sumDist = (dist) => {
+            if (!dist) return null;
+            return Object.values(dist).reduce((a,b)=> a + (Number(b) || 0), 0);
+        };
+        const nFor = (branch, col) => {
+            const groups = brRatingCounts?.[branch] || null;
+            if (!groups) return null;
+            const map = {
+                Academics: 'Subjects',
+                Infrastructure: 'Infrastructure',
+                Environment: 'Environment',
+                Administration: 'Administrative Support'
+            };
+            const g = map[col];
+            const dist = g ? groups?.[g] : null;
+            return sumDist(dist);
+        };
+        const makeCell = (branch, col, val) => {
+            const vOk = !(val == null || isNaN(val));
+            const v = vOk ? Number(val) : 0;
+            const pct = v / 5;
+            const red = Math.round((1 - pct) * 255);
+            const green = Math.round(pct * 180);
+            const nFallback = branches?.[branch]?.count || null;
+            const nn = nFallback;
+            const pctStr = vOk ? `${Math.round(pct * 100)}%` : '-';
+            const nStr = nn != null ? `n=${Number(nn).toLocaleString()}` : '';
+            const sub = (nStr || pctStr !== '-') ? `<div style="font-size:0.85em; font-weight:700; opacity:0.95; margin-top:2px;">${[nStr, pctStr !== '-' ? pctStr : ''].filter(Boolean).join(' • ')}</div>` : '';
+            return `<td style="background: rgb(${red},${green},80); color:#fff; text-align:center; padding:8px;">`+
+                `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? v.toFixed(2) : '-'}</div>${sub}</td>`;
         };
         container.innerHTML = `<div style="overflow:auto"><table class="ranking-table"><thead><tr><th>Branch</th><th>Academics</th><th>Infrastructure</th><th>Environment</th><th>Administration</th></tr></thead><tbody>`+
-            rows.map(r => `<tr><td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>${makeCell(r.Academics)}${makeCell(r.Infrastructure)}${makeCell(r.Environment)}${makeCell(r.Administration)}</tr>`).join('')+
+            rows.map(r => `<tr><td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>`+
+                `${makeCell(r.Branch, 'Academics', r.Academics)}`+
+                `${makeCell(r.Branch, 'Infrastructure', r.Infrastructure)}`+
+                `${makeCell(r.Branch, 'Environment', r.Environment)}`+
+                `${makeCell(r.Branch, 'Administration', r.Administration)}`+
+                `</tr>`).join('')+
             `</tbody></table></div>`;
     }
 }
