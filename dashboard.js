@@ -1,6 +1,9 @@
 let RAW_DATA = null;
 let CURRENT_BRANCH = '';
 
+// Debug: Log when script loads
+console.log('🟢 Dashboard script loaded at:', new Date().toISOString());
+
 fetch('feedback_stats.json')
     .then(response => response.json())
     .then(data => {
@@ -83,6 +86,29 @@ function deriveViewData(data, branch) {
         const noAgg = aggKind('No');
         recReasons = { Yes: yesAgg, No: noAgg };
     } catch(_) {}
+    let categoryPerf = data.branch_category_performance?.[branch] || {};
+    try {
+        const hasAny = categoryPerf && Object.keys(categoryPerf).length;
+        const brCounts = data.branch_rating_counts?.[branch] || null;
+        if (!hasAny && brCounts) {
+            const makeItem = (label, counts) => {
+                const exc = counts?.Excellent || 0;
+                const good = counts?.Good || 0;
+                const avg = counts?.Average || 0;
+                const poor = counts?.Poor || 0;
+                const denom = exc + good + avg + poor;
+                const average = denom ? ((5 * exc + 4 * good + 3 * avg + 1 * poor) / denom) : null;
+                return { average, rating_distribution: { Excellent: exc, Good: good, Average: avg, Poor: poor } };
+            };
+            categoryPerf = {
+                'Environment Quality': { 'Environment': makeItem('Environment', brCounts.Environment) },
+                'Infrastructure': { 'Infrastructure': makeItem('Infrastructure', brCounts.Infrastructure) },
+                'Parent-Teacher Interaction': { 'Parent-Teacher': makeItem('Parent-Teacher', brCounts['Parent-Teacher']) },
+                'Administrative Support': { 'Administrative Support': makeItem('Administrative Support', brCounts['Administrative Support']) }
+            };
+        }
+    } catch (_) {}
+
     return {
         summary: {
             total_responses: bp.count || 0,
@@ -97,21 +123,39 @@ function deriveViewData(data, branch) {
         recommendation: { distribution: recCounts, yes_pct: yesPct },
         recommendation_reasons: recReasons || data.recommendation_reasons || {},
         subject_performance: data.branch_subject_performance?.[branch] || {},
-        category_performance: data.branch_category_performance?.[branch] || {},
+        category_performance: categoryPerf,
         teaching_indicators: data.teaching_indicators_by_branch?.[branch] || data.teaching_indicators || {},
         ptm_effectiveness: data.ptm_effectiveness_by_branch?.[branch] ?? data.ptm_effectiveness ?? null,
         communication_metrics: data.communication_metrics_by_branch?.[branch] || data.communication_metrics || {},
         environment_focus: data.environment_focus_by_branch?.[branch] || data.environment_focus || {},
         concern_roles: data.concern_roles_by_branch?.[branch] || data.concern_roles || {},
         concern_resolution: data.branch_concern_resolution?.[branch] || data.concern_resolution || {},
-        // keep global sets for branch comparison section
+        // Keep rankings global. Scope branch_* maps to the selected branch only.
         rankings: data.rankings,
-        branch_performance: data.branch_performance,
-        branch_recommendation_pct: data.branch_recommendation_pct,
-        branch_recommendation_counts: data.branch_recommendation_counts,
-        branch_rating_counts: data.branch_rating_counts,
-        branch_recommendation_counts_by: data.branch_recommendation_counts_by,
-        branch_rating_counts_by: data.branch_rating_counts_by,
+        branch_performance: (data.branch_performance && data.branch_performance[branch]) ? { [branch]: data.branch_performance[branch] } : {},
+        branch_recommendation_pct: (data.branch_recommendation_pct && data.branch_recommendation_pct[branch] != null) ? { [branch]: data.branch_recommendation_pct[branch] } : {},
+        branch_recommendation_counts: (data.branch_recommendation_counts && data.branch_recommendation_counts[branch]) ? { [branch]: data.branch_recommendation_counts[branch] } : {},
+        branch_rating_counts: (data.branch_rating_counts && data.branch_rating_counts[branch]) ? { [branch]: data.branch_rating_counts[branch] } : {},
+        branch_recommendation_counts_by: (() => {
+            const out = { class: {}, orientation: {}, pair: {} };
+            try {
+                const by = data.branch_recommendation_counts_by || {};
+                out.class = Object.fromEntries(Object.entries(by.class || {}).map(([k, v]) => [k, v?.[branch] ? { [branch]: v[branch] } : {}]));
+                out.orientation = Object.fromEntries(Object.entries(by.orientation || {}).map(([k, v]) => [k, v?.[branch] ? { [branch]: v[branch] } : {}]));
+                out.pair = Object.fromEntries(Object.entries(by.pair || {}).map(([cls, obj]) => [cls, Object.fromEntries(Object.entries(obj || {}).map(([ori, map]) => [ori, map?.[branch] ? { [branch]: map[branch] } : {}]))]));
+            } catch (_) {}
+            return out;
+        })(),
+        branch_rating_counts_by: (() => {
+            const out = { class: {}, orientation: {}, pair: {} };
+            try {
+                const by = data.branch_rating_counts_by || {};
+                out.class = Object.fromEntries(Object.entries(by.class || {}).map(([k, v]) => [k, v?.[branch] ? { [branch]: v[branch] } : {}]));
+                out.orientation = Object.fromEntries(Object.entries(by.orientation || {}).map(([k, v]) => [k, v?.[branch] ? { [branch]: v[branch] } : {}]));
+                out.pair = Object.fromEntries(Object.entries(by.pair || {}).map(([cls, obj]) => [cls, Object.fromEntries(Object.entries(obj || {}).map(([ori, map]) => [ori, map?.[branch] ? { [branch]: map[branch] } : {}]))]));
+            } catch (_) {}
+            return out;
+        })(),
         summary_all: data.summary
     };
 }
@@ -120,6 +164,10 @@ function deriveViewData(data, branch) {
 function resetCanvas(id) {
     const old = document.getElementById(id);
     if (!old) return null;
+    try {
+        const ch = (typeof Chart !== 'undefined' && Chart.getChart) ? Chart.getChart(old) : null;
+        if (ch) ch.destroy();
+    } catch (_) {}
     const parent = old.parentNode;
     const c = old.cloneNode(false);
     parent.replaceChild(c, old);
@@ -184,14 +232,13 @@ function findItemCountInCategories(data, label) {
 
 // Render all primary sections (except the global branch comparison)
 function renderAllSections(viewData) {
-    renderExecutiveSummary(viewData);
-    renderAcademicSection(viewData);
-    renderEnvironmentSection(viewData);
-    renderCommunicationSection(viewData);
-    renderInfrastructureSection(viewData);
-    renderStrengthsSection(viewData);
-    // Always call to update visibility; the renderer will short-circuit when a branch is selected
-    try { renderBranchComparisonSection(RAW_DATA); } catch (_) {}
+    try { renderExecutiveSummary(viewData); } catch (e) { console.error(e); }
+    try { renderAcademicSection(viewData); } catch (e) { console.error(e); }
+    try { renderEnvironmentSection(viewData); } catch (e) { console.error(e); }
+    try { renderCommunicationSection(viewData); } catch (e) { console.error(e); }
+    try { renderInfrastructureSection(viewData); } catch (e) { console.error(e); }
+    try { renderStrengthsSection(viewData); } catch (e) { console.error(e); }
+    try { renderBranchComparisonSection(viewData); } catch (e) { console.error(e); }
 }
 
 // Create collapsible toggles for each section and wire expand/collapse buttons
@@ -225,6 +272,7 @@ function initAccordion() {
 }
 
 // Populate global branch selector and re-render on change
+let __branchSelectorWired = false;
 function initGlobalBranchSelector(data) {
     const sel = document.getElementById('globalBranchSelect');
     if (!sel) return;
@@ -233,19 +281,35 @@ function initGlobalBranchSelector(data) {
     if (sel.options.length <= 1) {
         branches.forEach(b => { const o = document.createElement('option'); o.value = b; o.textContent = toEnglishLabel(b); sel.appendChild(o); });
     }
-    sel.addEventListener('change', () => {
-        CURRENT_BRANCH = sel.value || '';
-        const view = deriveViewData(RAW_DATA, CURRENT_BRANCH);
-        renderAllSections(view);
-        // Auto-enable Segment comparison for simplicity
-        const cmp = document.getElementById('compareBySelect');
-        if (cmp) {
-            cmp.value = 'segment';
-            cmp.dispatchEvent(new Event('change'));
-        } else {
-            renderComparison(view);
-        }
-    });
+    // Attach event listener only once
+    if (!__branchSelectorWired) {
+        __branchSelectorWired = true;
+        console.log('🟢 Attaching branch selector event listener');
+        sel.addEventListener('change', (e) => {
+            console.log('🔴 CHANGE EVENT FIRED! Event:', e);
+            console.log('🔴 Selected value:', sel.value);
+            CURRENT_BRANCH = sel.value || '';
+            console.log('🔵 Branch selected:', CURRENT_BRANCH || 'All Branches');
+            console.log('🔵 RAW_DATA available:', !!RAW_DATA);
+            const view = deriveViewData(RAW_DATA, CURRENT_BRANCH);
+            console.log('🔵 Derived view summary:', view.summary);
+            console.log('🔵 About to call renderAllSections...');
+            renderAllSections(view);
+            console.log('🔵 Finished renderAllSections, now calling renderComparison...');
+            // Auto-enable Segment comparison for simplicity
+            const cmp = document.getElementById('compareBySelect');
+            if (cmp) {
+                cmp.value = 'segment';
+                cmp.dispatchEvent(new Event('change'));
+            } else {
+                renderComparison(view);
+            }
+            sanitizeDisplayedText();
+            console.log('🔵 Render complete for branch:', CURRENT_BRANCH || 'All Branches');
+        });
+    } else {
+        console.log('⚠️ Branch selector already wired, skipping');
+    }
     // Default remains "All Branches" (no auto-select)
 }
 
@@ -351,8 +415,11 @@ function aggregateSegments(branch) {
     const recByBranch = RAW_DATA?.branch_segment_recommendation_counts || {};
     const result = {};
     if (branch) {
+        console.log('📊 Aggregating segments for branch:', branch);
         const p = perfByBranch[branch] || {};
         const r = recByBranch[branch] || {};
+        console.log('📊 Branch segment performance:', p);
+        console.log('📊 Branch segment recommendations:', r);
         order.forEach(seg => {
             if (!p[seg] && !r[seg]) return;
             const pc = p[seg] || {};
@@ -363,6 +430,7 @@ function aggregateSegments(branch) {
                 rec: { Yes: rc.Yes||0, No: rc.No||0, Maybe: rc.Maybe||0 }
             };
         });
+        console.log('📊 Aggregated segment result:', result);
         return result;
     }
     // Aggregate across all branches
@@ -404,8 +472,10 @@ function renderSegmentOverallChart() {
 function renderSegmentCountsGrid() {
     const grid = document.getElementById('segmentCountsGrid');
     if (!grid) return;
+    console.log('📊 renderSegmentCountsGrid called, CURRENT_BRANCH:', CURRENT_BRANCH);
     const order = ['Pre Primary','Primary','High School'];
     const agg = aggregateSegments(CURRENT_BRANCH);
+    console.log('📊 Aggregated data for counts:', agg);
     const segs = order.filter(s => agg[s]);
     grid.innerHTML = segs.map(s => {
         const d = agg[s];
@@ -425,8 +495,10 @@ function renderSegmentCountsGrid() {
 function renderSegmentTotalsGrid() {
     const grid = document.getElementById('segmentTotalsGrid');
     if (!grid) return;
+    console.log('📊 renderSegmentTotalsGrid called, CURRENT_BRANCH:', CURRENT_BRANCH);
     const order = ['Pre Primary','Primary','High School'];
     const agg = aggregateSegments(CURRENT_BRANCH);
+    console.log('📊 Aggregated data for totals:', agg);
     const segs = order.filter(s => agg[s]);
     if (!segs.length) { grid.innerHTML = '<div class="kpi"><div class="label">No responses</div><div class="value">0</div></div>'; return; }
     grid.innerHTML = segs.map(s => {
@@ -843,7 +915,8 @@ function renderParentTeacherChart(data) {
 }
 
 function renderAdminChart(data) {
-    const ctx = document.getElementById('adminChart').getContext('2d');
+    const ctx = (typeof resetCanvas === 'function' ? resetCanvas('adminChart') : null) || document.getElementById('adminChart')?.getContext('2d');
+    if (!ctx) return;
     const adm = (data.category_performance && data.category_performance['Administrative Support']) || {};
     const metrics = Object.entries(adm).slice(0, 6);
     const nArr = metrics.map(([k, v]) => {
@@ -942,7 +1015,7 @@ function renderExecutiveSummary(data) {
     }
 
     const cat = data.summary.category_scores || {};
-    const catCtx = document.getElementById('summaryCategoryChart')?.getContext('2d');
+    const catCtx = (typeof resetCanvas === 'function' ? resetCanvas('summaryCategoryChart') : null) || document.getElementById('summaryCategoryChart')?.getContext('2d');
     if (catCtx) {
         const raw = Object.keys(cat);
         const labels = raw.map(l => toEnglishLabel(l));
@@ -978,7 +1051,7 @@ function renderExecutiveSummary(data) {
     }
 
     const rec = data.recommendation?.distribution || {};
-    const recCtx = document.getElementById('recommendationChart')?.getContext('2d');
+    const recCtx = (typeof resetCanvas === 'function' ? resetCanvas('recommendationChart') : null) || document.getElementById('recommendationChart')?.getContext('2d');
     if (recCtx) {
         const labels = ['Yes','No','Maybe'];
         const values = labels.map(l => rec[l] || 0);
@@ -1043,7 +1116,7 @@ function renderExecutiveSummary(data) {
     // Render totals, per-segment counts, Y/N/Maybe stacked bar and 3-bar segment overall for All or selected branch
     try { renderSegmentTotalsGrid(); renderSegmentCountsGrid(); renderSegmentYNMChart(); renderSegmentOverallChart(); } catch (e) { }
 
-    const brCtx = document.getElementById('branchOverallChart')?.getContext('2d');
+    const brCtx = (typeof resetCanvas === 'function' ? resetCanvas('branchOverallChart') : null) || document.getElementById('branchOverallChart')?.getContext('2d');
     if (brCtx && data.rankings?.branches) {
         const arr = (data.rankings.branches || []).slice();
         const parent = document.getElementById('branchOverallChart')?.parentElement;
@@ -1073,8 +1146,10 @@ function renderExecutiveSummary(data) {
 }
 
 function renderAcademicSection(data) {
-    // Subject-wise stacked distribution
-    const subj = data.subject_performance || {};
+    console.log('📚 renderAcademicSection called, CURRENT_BRANCH:', CURRENT_BRANCH);
+    console.log('📚 Received data.subject_performance:', Object.keys(data.subject_performance || {}));
+    // Subject-wise stacked distribution - use the viewData directly (already filtered by deriveViewData)
+    let subj = data.subject_performance || {};
     const subjectsAll = Object.keys(subj);
     const subjects = subjectsAll.filter(name => {
         const dist = subj[name]?.rating_distribution || {};
@@ -1303,10 +1378,13 @@ function renderAcademicSegmentBlocks() {
     }
 
     const order = ['Pre Primary','Primary','High School'];
-    // Select data source: per-branch-per-segment or global per-segment
-    const segMap = (CURRENT_BRANCH && RAW_DATA?.branch_segment_subject_performance?.[CURRENT_BRANCH])
-        ? RAW_DATA.branch_segment_subject_performance[CURRENT_BRANCH]
-        : (RAW_DATA?.segment_subject_performance || {});
+    // Select data source: if a branch is selected, use only that branch's per-segment subjects (no global fallback)
+    let segMap;
+    if (CURRENT_BRANCH) {
+        segMap = RAW_DATA?.branch_segment_subject_performance?.[CURRENT_BRANCH] || {};
+    } else {
+        segMap = RAW_DATA?.segment_subject_performance || {};
+    }
     const segs = order.filter(s => segMap[s] && Object.keys(segMap[s]).length);
     if (!segs.length) return;
 
@@ -1424,8 +1502,10 @@ function renderAcademicSegmentBlocks() {
 }
 
 function renderEnvironmentSection(data) {
-    // Use Environment Quality detailed metrics (averages + distributions)
-    const envCat = (data.category_performance && data.category_performance['Environment Quality']) || {};
+    console.log('🌳 renderEnvironmentSection called, CURRENT_BRANCH:', CURRENT_BRANCH);
+    // Use Environment Quality detailed metrics - use the viewData directly (already filtered by deriveViewData)
+    let envCat = (data.category_performance && data.category_performance['Environment Quality']) || {};
+    console.log('🌳 Environment categories:', Object.keys(envCat));
     const rawLabels = Object.keys(envCat);
     const displayLabels = rawLabels.map(toEnglishLabel);
 
@@ -1563,8 +1643,10 @@ function renderEnvironmentSection(data) {
 }
 
 function renderCommunicationSection(data) {
+    console.log('💬 renderCommunicationSection called, CURRENT_BRANCH:', CURRENT_BRANCH);
     const cm = data.communication_metrics || {};
-    const cc = document.getElementById('communicationChart')?.getContext('2d');
+    console.log('💬 Communication metrics:', Object.keys(cm));
+    const cc = (typeof resetCanvas === 'function' ? resetCanvas('communicationChart') : null) || document.getElementById('communicationChart')?.getContext('2d');
     if (cc) {
         const raw = Object.keys(cm);
         const labels = raw.map(l => toEnglishLabel(l));
@@ -1574,7 +1656,7 @@ function renderCommunicationSection(data) {
     try { renderAdminChart(data); } catch(e) { }
 
     const roles = data.concern_roles || {};
-    const rc = document.getElementById('concernRoleChart')?.getContext('2d');
+    const rc = (typeof resetCanvas === 'function' ? resetCanvas('concernRoleChart') : null) || document.getElementById('concernRoleChart')?.getContext('2d');
     if (rc) {
         const raw = Object.keys(roles);
         const labels = raw.map(l => toEnglishLabel(l));
@@ -1583,7 +1665,7 @@ function renderCommunicationSection(data) {
     }
 
     const cr = data.concern_resolution || {};
-    const crc = document.getElementById('concernResolutionChart')?.getContext('2d');
+    const crc = (typeof resetCanvas === 'function' ? resetCanvas('concernResolutionChart') : null) || document.getElementById('concernResolutionChart')?.getContext('2d');
     if (crc) {
         const labels = ['Yes','No','Not Applicable'];
         const values = labels.map(l => cr[l] || 0);
@@ -1603,11 +1685,14 @@ function renderCommunicationSection(data) {
 }
 
 function renderInfrastructureSection(data) {
-    const infra = (data.category_performance && data.category_performance['Infrastructure']) || {};
+    console.log('🏗️ renderInfrastructureSection called, CURRENT_BRANCH:', CURRENT_BRANCH);
+    // Use Infrastructure detailed metrics - use the viewData directly (already filtered by deriveViewData)
+    let infra = (data.category_performance && data.category_performance['Infrastructure']) || {};
+    console.log('🏗️ Infrastructure categories:', Object.keys(infra));
     const raw = Object.keys(infra);
     const labels = raw.map(toEnglishLabel);
     const values = raw.map(l => infra[l]?.average || 0);
-    const ic = document.getElementById('infraCategoryChart')?.getContext('2d');
+    const ic = (typeof resetCanvas === 'function' ? resetCanvas('infraCategoryChart') : null) || document.getElementById('infraCategoryChart')?.getContext('2d');
     if (ic) {
         const nArr = raw.map(l => {
             const dist = infra[l]?.rating_distribution || {};
@@ -1619,6 +1704,7 @@ function renderInfrastructureSection(data) {
     // Simple heatmap: Branch x {Academics, Infrastructure, Environment, Administration}
     const container = document.getElementById('infraHeatmap');
     if (container) {
+        console.log('🏗️ Rendering heatmap, branch_performance:', Object.keys(data.branch_performance || {}));
         const branches = data.branch_performance || {};
         const rows = Object.entries(branches).map(([b, v]) => ({
             Branch: b,
@@ -1640,7 +1726,9 @@ function renderInfrastructureSection(data) {
 }
 
 function renderStrengthsSection(data) {
+    console.log('⭐ renderStrengthsSection called, CURRENT_BRANCH:', CURRENT_BRANCH);
     const cat = Object.assign({}, data.summary.category_scores || {});
+    console.log('⭐ Category scores:', cat);
     // Derive Communication aggregate
     const cm = data.communication_metrics || {};
     const commVals = Object.values(cm);
@@ -1657,12 +1745,12 @@ function renderStrengthsSection(data) {
     const top = pairs.slice().sort((a,b)=>b[1]-a[1]).slice(0,5);
     const low = pairs.slice().sort((a,b)=>a[1]-b[1]).slice(0,5);
 
-    const strengthCtx = document.getElementById('topStrengthsChart')?.getContext('2d');
+    const strengthCtx = (typeof resetCanvas === 'function' ? resetCanvas('topStrengthsChart') : null) || document.getElementById('topStrengthsChart')?.getContext('2d');
     if (strengthCtx) {
         new Chart(strengthCtx, { type: 'bar', data: { labels: top.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Avg', data: top.map(x=>x[1]), backgroundColor: '#26a69a' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
 
-    const impCtx = document.getElementById('topImprovementsChart')?.getContext('2d');
+    const impCtx = (typeof resetCanvas === 'function' ? resetCanvas('topImprovementsChart') : null) || document.getElementById('topImprovementsChart')?.getContext('2d');
     if (impCtx) {
         new Chart(impCtx, { type: 'bar', data: { labels: low.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Avg', data: low.map(x=>x[1]), backgroundColor: '#ef5350' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
@@ -1679,7 +1767,7 @@ function renderBranchComparisonSection(data) {
         if (wrap) wrap.style.display = CURRENT_BRANCH ? 'none' : '';
     } catch(_) {}
     const ranked = (data.rankings?.branches || []);
-    const rankCtx = document.getElementById('branchRankedChart')?.getContext('2d');
+    const rankCtx = (typeof resetCanvas === 'function' ? resetCanvas('branchRankedChart') : null) || document.getElementById('branchRankedChart')?.getContext('2d');
     if (rankCtx) {
         const arr = ranked.slice();
         const parent = document.getElementById('branchRankedChart')?.parentElement;
@@ -1717,7 +1805,7 @@ function renderBranchComparisonSection(data) {
             brPct = tmp;
         }
     } catch (_e) {}
-    const recCtx = document.getElementById('branchRecommendChart')?.getContext('2d');
+    const recCtx = (typeof resetCanvas === 'function' ? resetCanvas('branchRecommendChart') : null) || document.getElementById('branchRecommendChart')?.getContext('2d');
     if (recCtx) {
         const entries = Object.entries(brPct).filter(([,v])=> v!=null);
         entries.sort((a,b)=>b[1]-a[1]);
@@ -1726,7 +1814,7 @@ function renderBranchComparisonSection(data) {
         new Chart(recCtx, { type: 'bar', data: { labels, datasets: [{ label: '% Recommend', data: values, backgroundColor: '#8d6e63' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } } } });
     }
 
-    const scatterCtx = document.getElementById('branchScatterChart')?.getContext('2d');
+    const scatterCtx = (typeof resetCanvas === 'function' ? resetCanvas('branchScatterChart') : null) || document.getElementById('branchScatterChart')?.getContext('2d');
     if (scatterCtx) {
         const branches = data.branch_performance || {};
         const points = Object.entries(branches).map(([name,val])=> ({ x: val.subject_avg || 0, y: val.infrastructure_avg || 0, r: Math.max(4, Math.min(10, (val.count||10)/50)), label: toEnglishLabel(name) }));
