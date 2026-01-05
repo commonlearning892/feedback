@@ -23,6 +23,7 @@ function applyResponsiveChartDefaults() {
     if (window.Chart && Chart.defaults) {
         Chart.defaults.font = Chart.defaults.font || {};
         Chart.defaults.font.size = base;
+        Chart.defaults.font.family = "'Inter', -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif";
         Chart.defaults.plugins = Chart.defaults.plugins || {};
         Chart.defaults.plugins.legend = Chart.defaults.plugins.legend || {};
         Chart.defaults.plugins.legend.labels = Chart.defaults.plugins.legend.labels || {};
