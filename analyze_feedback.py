@@ -12,9 +12,100 @@ from pptx.chart.data import CategoryChartData, ChartData, XyChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 from pptx.enum.shapes import MSO_SHAPE
 
-# Read CSV file
-csv_file = "/Users/venkubabugollapudi/Desktop/Feedback/Feed Back/Parent Feedback Form – Academic & Administrative Review - Pre Primary.csv"
-df = pd.read_csv(csv_file)
+# Read multiple CSV files: auto-discover in the script directory
+base_dir = os.path.dirname(__file__)
+csv_files = []
+try:
+    for fname in os.listdir(base_dir):
+        if fname.lower().endswith('.csv') and 'parent feedback form' in fname.lower():
+            csv_files.append(os.path.join(base_dir, fname))
+except Exception:
+    pass
+
+# Discover Excel files as well
+xlsx_files = []
+try:
+    for fname in os.listdir(base_dir):
+        if fname.lower().endswith('.xlsx') and 'parent feedback form' in fname.lower():
+            xlsx_files.append(os.path.join(base_dir, fname))
+except Exception:
+    pass
+
+# Prefer XLSX if present; otherwise fall back to CSV
+input_files_used = xlsx_files if xlsx_files else csv_files
+
+def _normalize_text(s):
+    try:
+        t = str(s).strip().lower()
+    except Exception:
+        t = str(s).lower()
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+def try_read_excel_with_header_detection(path):
+    try:
+        df0 = pd.read_excel(path, header=None)
+    except Exception as e:
+        raise e
+    header_row = None
+    candidates = ['name of the branch', 'branch', 'கிளை', 'கிளையின்']
+    max_nonempty = -1
+    for r in range(min(10, len(df0))):
+        row_vals = [str(v).lower() if not pd.isna(v) else '' for v in list(df0.iloc[r].values)]
+        hit = any(any(c in v for c in candidates) for v in row_vals)
+        if hit:
+            nonempty = sum(1 for v in row_vals if str(v).strip() != '')
+            if nonempty > max_nonempty:
+                max_nonempty = nonempty
+                header_row = r
+    if header_row is None:
+        df = pd.read_excel(path)
+    else:
+        df = pd.read_excel(path, header=header_row)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+frames = []
+for path in input_files_used:
+    try:
+        if os.path.exists(path):
+            seg = 'Pre Primary' if 'Pre Primary' in path else ('Primary' if 'Primary' in path and 'High School' not in path else ('High School' if 'High School' in path else 'Unknown'))
+            if path.lower().endswith('.xlsx'):
+                try:
+                    _df = try_read_excel_with_header_detection(path)
+                except Exception as e:
+                    print(f"Warning: could not read Excel {path}: {e}. If missing, install the 'openpyxl' package.")
+                    continue
+            elif path.lower().endswith('.csv'):
+                _df = pd.read_csv(path)
+            else:
+                continue
+            try:
+                _df.columns = [str(c).strip() for c in _df.columns]
+            except Exception:
+                pass
+            _df['Segment'] = seg
+            frames.append(_df)
+    except Exception as e:
+        print(f"Warning: could not read {path}: {e}")
+
+# If XLSX files were preferred but none could be read, fall back to CSVs if available
+if not frames and xlsx_files and csv_files:
+    print("Note: Could not parse Excel files; falling back to CSV. To use Excel inputs, install 'openpyxl'.")
+    for path in csv_files:
+        try:
+            if os.path.exists(path):
+                seg = 'Pre Primary' if 'Pre Primary' in path else ('Primary' if 'Primary' in path and 'High School' not in path else ('High School' if 'High School' in path else 'Unknown'))
+                _df = pd.read_csv(path)
+                _df['Segment'] = seg
+                frames.append(_df)
+        except Exception as e:
+            print(f"Warning: could not read {path}: {e}")
+
+if not frames:
+    raise FileNotFoundError("No input CSV/XLSX files found. Expected Pre Primary, Primary, or High School files in the folder. If using Excel, ensure 'openpyxl' is installed.")
+
+df = pd.concat(frames, ignore_index=True)
 
 # Remove empty rows
 df = df.dropna(how='all')
@@ -44,12 +135,43 @@ rating_map = {
     'No(இல்லை)': 1
 }
 
+def canonicalize_rating(value):
+    if pd.isna(value) or value == '':
+        return None
+    s = str(value).strip().lower()
+    # Tamil/localized variants included
+    if 'not applicable' in s or 'பொருந்தாது' in s:
+        return 'Not Applicable'
+    if 'excellent' in s or 'மிகநன்று' in s or 'மிக நன்று' in s:
+        return 'Excellent'
+    if 'good' in s or 'நன்று' in s:
+        return 'Good'
+    if 'average' in s or 'satisfactory' in s or 'திருப்தி' in s or 'சராசரி' in s:
+        return 'Average'
+    if 'poor' in s or 'மோசம்' in s or 'needs' in s or 'need' in s or 'improve' in s or 'முன்னேற்றம்' in s:
+        return 'Poor'
+    return None
+
 def normalize_rating(value):
     """Convert rating strings to numeric values"""
     if pd.isna(value) or value == '':
         return 0
     value_str = str(value).strip()
-    return rating_map.get(value_str, 0)
+    if value_str in rating_map:
+        return rating_map[value_str]
+    # Fallback: canonicalize and map
+    cat = canonicalize_rating(value_str)
+    if cat == 'Excellent':
+        return 5
+    if cat == 'Good':
+        return 4
+    if cat == 'Average':
+        return 3
+    if cat == 'Poor':
+        return 1
+    if cat == 'Not Applicable':
+        return 0
+    return 0
 
 # Extract key columns
 branch_col = 'Name of the Branch( கிளையின் பெயர்)'
@@ -57,19 +179,97 @@ class_col = 'Class( வகுப்பு )'
 orientation_col = 'Orientation( பயிற்சி வகை )'
 language_col = 'II Language( இரண்டாம் மொழிப்பாடம்) '
 
+def normalize_branch_name(s):
+    if pd.isna(s):
+        return 'Unknown'
+    t = str(s).strip()
+    t = re.sub(r'\s+', ' ', t)
+    t = re.sub(r'[\-_/]+$', '', t).strip()
+    t = t.title()
+    return t
+
+def branch_canonical_key(s):
+    if pd.isna(s):
+        return 'unknown'
+    t = str(s).lower().strip()
+    t = re.sub(r'\b(sri|chaitanya|techno|technos|school|schools|campus|branch)\b', '', t)
+    t = re.sub(r'[^a-z0-9]', '', t)
+    return t
+
+# Resolve key columns by keyword matching; create if missing
+def resolve_column_name(df_in, expected, keywords):
+    try:
+        cols = list(df_in.columns)
+    except Exception:
+        cols = []
+    if expected in cols:
+        return expected
+    best = None
+    best_score = 0
+    for c in cols:
+        low = _normalize_text(c)
+        score = sum(1 for kw in keywords if kw in low)
+        if score > best_score:
+            best_score = score
+            best = c
+    return best if best else expected
+
+def resolve_or_create(df_in, expected, keywords):
+    col = resolve_column_name(df_in, expected, keywords)
+    if col not in df_in.columns:
+        df_in[col] = None
+    return col
+
+branch_col = resolve_or_create(df, branch_col, ['name of the branch', 'branch', 'கிளை'])
+class_col = resolve_or_create(df, class_col, ['class', 'வகுப்பு'])
+orientation_col = resolve_or_create(df, orientation_col, ['orientation', 'பயிற்சி'])
+language_col = resolve_or_create(df, language_col, ['ii language', 'language', 'இரண்டாம்', 'மொழி'])
+
 # Normalize branch names
-df[branch_col] = df[branch_col].fillna('Unknown').str.strip()
+df[branch_col] = df[branch_col].apply(normalize_branch_name)
+# Club similar branch names: compute canonical key and remap to most frequent display variant
+try:
+    df['BranchKey'] = df[branch_col].apply(branch_canonical_key)
+    display_map = {}
+    for key, grp in df.groupby('BranchKey'):
+        name_counts = grp[branch_col].value_counts()
+        # choose most frequent; tie-breaker: shortest name
+        top_count = name_counts.max()
+        candidates = [n for n, c in name_counts.items() if c == top_count]
+        display = sorted(candidates, key=lambda x: (len(str(x)), str(x)))[0]
+        display_map[key] = display
+    df[branch_col] = df['BranchKey'].map(display_map).fillna(df[branch_col])
+    df.drop(columns=['BranchKey'], inplace=True)
+except Exception:
+    pass
+
 df[class_col] = df[class_col].fillna('Unknown').str.strip()
 df[orientation_col] = df[orientation_col].fillna('Unknown').str.strip()
 df[language_col] = df[language_col].fillna('Unknown').str.strip()
 
-# Subject feedback columns
-subject_cols = {
-    'Literacy (English)': 'Subject Wise Feedback( பாடம் வாரியான பின்னூட்டம்)  [Literacy skills( English) - Reading/writting/identification]',
-    'Numeracy (Math)': 'Subject Wise Feedback( பாடம் வாரியான பின்னூட்டம்)  [Numeracy skills (Math)]',
-    'General Awareness': 'Subject Wise Feedback( பாடம் வாரியான பின்னூட்டம்)  [General awareness]',
-    'Second Language': 'Subject Wise Feedback( பாடம் வாரியான பின்னூட்டம்)  [Second language(NA for Pre K)]'
-}
+# Subject feedback columns (dynamic detection across segments)
+subject_cols = {}
+for col in df.columns:
+    lowc = str(col).lower()
+    if 'subject wise feedback' in lowc:
+        # Extract name inside square brackets if present
+        m = re.search(r'\[(.*?)\]', str(col))
+        if m:
+            name = m.group(1).strip()
+        else:
+            # Fallback: take text after the keyword
+            name = str(col).split(')', 1)[-1].strip()[:60]
+        # Shorten noisy names
+        name = re.sub(r'\s+', ' ', name)
+        name = name.replace('skills', '').replace(' - ', ' ').strip()
+        # Avoid duplicates
+        base = name if name else 'Subject'
+        key = base
+        i = 2
+        while key in subject_cols:
+            key = f"{base} {i}"
+            i += 1
+        subject_cols[key] = col
 
 # Environment quality columns (shortened names for analysis)
 env_cols = {}
@@ -108,18 +308,35 @@ for col in df.columns:
         df[col + '_numeric'] = df[col].apply(normalize_rating)
 
 # Calculate overall scores
-subject_numeric_cols = [subject_cols[k] + '_numeric' for k in subject_cols]
-env_numeric_cols = [env_cols[k] + '_numeric' for k in env_cols]
-infra_numeric_cols = [infra_cols[k] + '_numeric' for k in infra_cols]
-parent_numeric_cols = [parent_cols[k] + '_numeric' for k in parent_cols]
-admin_numeric_cols = [admin_cols[k] + '_numeric' for k in admin_cols]
+def existing_numeric(cols_dict):
+    return [col + '_numeric' for col in cols_dict.values() if (col + '_numeric') in df.columns]
+
+def rowwise_mean_from_cols(cols_dict):
+    series_list = []
+    for col in cols_dict.values():
+        if col in df.columns:
+            num_col = col + '_numeric'
+            if num_col in df.columns:
+                s = df[num_col]
+            else:
+                s = df[col].apply(normalize_rating)
+            series_list.append(s.replace(0, np.nan))
+    if not series_list:
+        return np.nan
+    return pd.concat(series_list, axis=1).mean(axis=1)
+
+subject_numeric_cols = existing_numeric(subject_cols)
+env_numeric_cols = existing_numeric(env_cols)
+infra_numeric_cols = existing_numeric(infra_cols)
+parent_numeric_cols = existing_numeric(parent_cols)
+admin_numeric_cols = existing_numeric(admin_cols)
 
 # Calculate average scores per student
-df['Subject_Avg'] = df[subject_numeric_cols].replace(0, np.nan).mean(axis=1)
-df['Environment_Avg'] = df[env_numeric_cols].replace(0, np.nan).mean(axis=1)
-df['Infrastructure_Avg'] = df[infra_numeric_cols].replace(0, np.nan).mean(axis=1)
-df['Parent_Teacher_Avg'] = df[parent_numeric_cols].replace(0, np.nan).mean(axis=1)
-df['Admin_Avg'] = df[admin_numeric_cols].replace(0, np.nan).mean(axis=1)
+df['Subject_Avg'] = rowwise_mean_from_cols(subject_cols)
+df['Environment_Avg'] = rowwise_mean_from_cols(env_cols)
+df['Infrastructure_Avg'] = rowwise_mean_from_cols(infra_cols)
+df['Parent_Teacher_Avg'] = rowwise_mean_from_cols(parent_cols)
+df['Admin_Avg'] = rowwise_mean_from_cols(admin_cols)
 df['Overall_Avg'] = df[[col for col in df.columns if col.endswith('_numeric')]].replace(0, np.nan).mean(axis=1)
 
 # Additional column detections for advanced dashboards
@@ -294,20 +511,95 @@ for class_name in df[class_col].unique():
             'overall_avg': float(class_data['Overall_Avg'].mean())
         }
 
-# Subject-wise analysis
+# Subject-wise analysis (overall)
 for subject_name, subject_col in subject_cols.items():
-    subject_numeric = subject_col + '_numeric'
-    ratings = df[subject_numeric].replace(0, np.nan)
+    if subject_col not in df.columns:
+        continue
+    num_col = subject_col + '_numeric'
+    if num_col in df.columns:
+        ratings = df[num_col].replace(0, np.nan)
+    else:
+        ratings = df[subject_col].apply(normalize_rating).replace(0, np.nan)
     stats['subject_performance'][subject_name] = {
         'average': float(ratings.mean()),
-        'excellent_count': int((df[subject_col] == 'Excellent(மிகநன்று)').sum()),
-        'good_count': int((df[subject_col] == 'Good(நன்று)').sum()),
-        'average_count': int((df[subject_col].isin(['Average(சராசரி)', 'Satisfactory(சராசரி)', 'Satisfactory(திருப்தி)'])).sum()),
-        'poor_count': int((df[subject_col].isin(['Poor(மோசம்)', 'Need Improvement(முன்னேற்றம் தேவை)', 'Needs Improvement(முன்னேற்றம் தேவை)', 'Needs to Improve(முன்னேற்றம் தேவை)'])).sum()),
+        'excellent_count': int((df[subject_col].astype(str).str.lower().str.contains('excellent')).sum()),
+        'good_count': int((df[subject_col].astype(str).str.lower().str.contains('good')).sum()),
+        'average_count': int((df[subject_col].astype(str).str.lower().str.contains('average|satisfactory|திருப்தி|சராசரி')).sum()),
+        'poor_count': int((df[subject_col].astype(str).str.lower().str.contains('poor|need|needs|improve|முன்னேற்றம்|மோசம்')).sum()),
         'rating_distribution': df[subject_col].value_counts().to_dict()
     }
 
-# Environment quality detailed analysis
+# Per-branch subject-wise analysis
+branch_subject_perf = {}
+for branch, group in df.groupby(branch_col):
+    subd = {}
+    for subject_name, subject_col in subject_cols.items():
+        if subject_col not in group.columns:
+            continue
+        num_col = subject_col + '_numeric'
+        if num_col in group.columns:
+            ratings = group[num_col].replace(0, np.nan)
+        else:
+            ratings = group[subject_col].apply(normalize_rating).replace(0, np.nan)
+        dist = group[subject_col].value_counts().to_dict()
+        subd[subject_name] = {
+            'average': float(ratings.mean()),
+            'rating_distribution': dist
+        }
+    branch_subject_perf[branch] = subd
+stats['branch_subject_performance'] = branch_subject_perf
+
+# Global per-segment subject-wise analysis
+segment_subject_perf = {}
+for seg, gseg in df.groupby('Segment'):
+    subd = {}
+    for subject_name, subject_col in subject_cols.items():
+        if subject_col not in gseg.columns:
+            continue
+        dist = gseg[subject_col].dropna().value_counts().to_dict()
+        total = sum(dist.values())
+        if total == 0:
+            continue
+        num_col = subject_col + '_numeric'
+        if num_col in gseg.columns:
+            ratings = gseg[num_col].replace(0, np.nan)
+        else:
+            ratings = gseg[subject_col].apply(normalize_rating).replace(0, np.nan)
+        subd[subject_name] = {
+            'average': float(ratings.mean()),
+            'rating_distribution': dist
+        }
+    if subd:
+        segment_subject_perf[seg] = subd
+stats['segment_subject_performance'] = segment_subject_perf
+
+# Per-branch, per-segment, subject-wise analysis
+branch_segment_subject_perf = {}
+for branch, g_branch in df.groupby(branch_col):
+    branch_segment_subject_perf[branch] = {}
+    for seg, gseg in g_branch.groupby('Segment'):
+        subd = {}
+        for subject_name, subject_col in subject_cols.items():
+            if subject_col not in gseg.columns:
+                continue
+            dist = gseg[subject_col].dropna().value_counts().to_dict()
+            total = sum(dist.values())
+            if total == 0:
+                continue
+            num_col = subject_col + '_numeric'
+            if num_col in gseg.columns:
+                ratings = gseg[num_col].replace(0, np.nan)
+            else:
+                ratings = gseg[subject_col].apply(normalize_rating).replace(0, np.nan)
+            subd[subject_name] = {
+                'average': float(ratings.mean()),
+                'rating_distribution': dist
+            }
+        if subd:
+            branch_segment_subject_perf[branch][seg] = subd
+stats['branch_segment_subject_performance'] = branch_segment_subject_perf
+
+# Environment quality detailed analysis (overall)
 for env_name, env_col in env_cols.items():
     env_numeric = env_col + '_numeric'
     ratings = df[env_numeric].replace(0, np.nan)
@@ -316,7 +608,7 @@ for env_name, env_col in env_cols.items():
         'rating_distribution': df[env_col].value_counts().to_dict()
     }
 
-# Infrastructure detailed analysis
+# Infrastructure detailed analysis (overall)
 for infra_name, infra_col in infra_cols.items():
     infra_numeric = infra_col + '_numeric'
     ratings = df[infra_numeric].replace(0, np.nan)
@@ -325,7 +617,7 @@ for infra_name, infra_col in infra_cols.items():
         'rating_distribution': df[infra_col].value_counts().to_dict()
     }
 
-# Parent-Teacher interaction analysis
+# Parent-Teacher interaction analysis (overall)
 for parent_name, parent_col in parent_cols.items():
     parent_numeric = parent_col + '_numeric'
     ratings = df[parent_numeric].replace(0, np.nan)
@@ -334,7 +626,7 @@ for parent_name, parent_col in parent_cols.items():
         'rating_distribution': df[parent_col].value_counts().to_dict()
     }
 
-# Administrative support analysis
+# Administrative support analysis (overall)
 for admin_name, admin_col in admin_cols.items():
     admin_numeric = admin_col + '_numeric'
     ratings = df[admin_numeric].replace(0, np.nan)
@@ -400,9 +692,20 @@ stats['recommendation'] = {
     'yes_pct': yes_pct
 }
 
-# PTM effectiveness
+# PTM effectiveness (overall and per branch)
 ptm_avg = mean_cols(ptm_cols)
 stats['ptm_effectiveness'] = ptm_avg
+ptm_by_branch = {}
+for branch, group in df.groupby(branch_col):
+    if not ptm_cols:
+        ptm_by_branch[branch] = None
+    else:
+        num_cols = [c + '_numeric' for c in ptm_cols if c + '_numeric' in group.columns]
+        if num_cols:
+            ptm_by_branch[branch] = float(group[num_cols].replace(0, np.nan).mean(axis=1).mean())
+        else:
+            ptm_by_branch[branch] = None
+stats['ptm_effectiveness_by_branch'] = ptm_by_branch
 
 # Teaching indicators aggregation
 stats['teaching_indicators'] = {
@@ -413,46 +716,76 @@ stats['teaching_indicators'] = {
 }
 
 # Environment focus metrics (pick common keywords from Environment Quality group)
-env_focus = {}
-for key, col in env_cols.items():
-    low = key.lower()
-    avg = float(df[col + '_numeric'].replace(0, np.nan).mean())
-    if 'interest' in low or 'enthusiasm' in low:
-        env_focus['Interest in attending school'] = avg
-    elif 'secure' in low or 'safety' in low:
-        env_focus['Campus safety'] = avg
-    elif 'moral' in low or 'values' in low:
-        env_focus['Moral values'] = avg
-    elif 'social' in low or 'confidence' in low:
-        env_focus['Social confidence'] = avg
+def compute_env_focus(df_subset):
+    env_focus_local = {}
+    for key, col in env_cols.items():
+        if (col + '_numeric') not in df_subset.columns:
+            continue
+        low = key.lower()
+        avg = float(df_subset[col + '_numeric'].replace(0, np.nan).mean())
+        if 'interest' in low or 'enthusiasm' in low:
+            env_focus_local['Interest in attending school'] = avg
+        elif 'secure' in low or 'safety' in low:
+            env_focus_local['Campus safety'] = avg
+        elif 'moral' in low or 'values' in low:
+            env_focus_local['Moral values'] = avg
+        elif 'social' in low or 'confidence' in low:
+            env_focus_local['Social confidence'] = avg
+    return env_focus_local
+
+env_focus = compute_env_focus(df)
 stats['environment_focus'] = env_focus
 
-# Communication metrics (common keywords)
-comm_metrics = {}
-for col in df.columns:
-    low = str(col).lower()
-    label = None
-    if 'front office' in low or 'front-office' in low:
-        label = 'Front Office Support'
-    elif 'leadership' in low or 'principal access' in low or 'access' in low:
-        label = 'Leadership Access'
-    elif 'app' in low and ('usability' in low or 'use' in low):
-        label = 'App Usability'
-    elif 'timely updates' in low or 'timely' in low or 'updates' in low:
-        label = 'Timely Updates'
-    if label:
-        num_col = col + '_numeric'
-        if num_col in df.columns:
-            comm_metrics[label] = float(df[num_col].replace(0, np.nan).mean())
+env_focus_by_branch = {}
+for branch, group in df.groupby(branch_col):
+    env_focus_by_branch[branch] = compute_env_focus(group)
+stats['environment_focus_by_branch'] = env_focus_by_branch
+
+# Communication metrics (common keywords) overall and per branch
+def compute_comm_metrics(df_subset):
+    cm = {}
+    for col in df.columns:
+        low = str(col).lower()
+        label = None
+        if 'front office' in low or 'front-office' in low:
+            label = 'Front Office Support'
+        elif 'leadership' in low or 'principal access' in low or 'access' in low:
+            label = 'Leadership Access'
+        elif 'app' in low and ('usability' in low or 'use' in low):
+            label = 'App Usability'
+        elif 'timely updates' in low or 'timely' in low or 'updates' in low:
+            label = 'Timely Updates'
+        if label:
+            num_col = col + '_numeric'
+            if num_col in df_subset.columns:
+                cm[label] = float(df_subset[num_col].replace(0, np.nan).mean())
+    return cm
+
+comm_metrics = compute_comm_metrics(df)
 stats['communication_metrics'] = comm_metrics
 
-# Concern handling role-wise averages
+comm_by_branch = {}
+for branch, group in df.groupby(branch_col):
+    comm_by_branch[branch] = compute_comm_metrics(group)
+stats['communication_metrics_by_branch'] = comm_by_branch
+
+# Concern handling role-wise averages (overall and per branch)
 concern_roles = {}
 for role, col in concern_roles_map.items():
     num_col = col + '_numeric'
     if num_col in df.columns:
         concern_roles[role] = float(df[num_col].replace(0, np.nan).mean())
 stats['concern_roles'] = concern_roles
+
+concern_roles_by_branch = {}
+for branch, group in df.groupby(branch_col):
+    vals = {}
+    for role, col in concern_roles_map.items():
+        num_col = col + '_numeric'
+        if num_col in group.columns:
+            vals[role] = float(group[num_col].replace(0, np.nan).mean())
+    concern_roles_by_branch[branch] = vals
+stats['concern_roles_by_branch'] = concern_roles_by_branch
 
 # Concern resolution distribution (Yes/No/Not Applicable)
 concern_dist = {'Yes': 0, 'No': 0, 'Not Applicable': 0, 'Maybe': 0}
@@ -633,11 +966,12 @@ if rec_col:
 def reasons_to_top(counter):
     total = sum(counter.values())
     if total == 0:
-        return {'total_reasons': 0, 'top': []}
+        return {'total_reasons': 0, 'top': [], 'top_detail': []}
     items = counter.most_common(8)
     return {
         'total_reasons': int(total),
-        'top': [[k, round(v*100.0/total, 1)] for k, v in items]
+        'top': [[k, round(v*100.0/total, 1)] for k, v in items],
+        'top_detail': [[k, int(v), round(v*100.0/total, 1)] for k, v in items]
     }
 
 stats['recommendation_reasons'] = {
@@ -651,6 +985,134 @@ stats['recommendation_reasons_raw'] = {
     'Maybe': reasons_to_top(rec_reasons_raw['Maybe']),
     'No': reasons_to_top(rec_reasons_raw['No'])
 }
+
+# Per-branch, per-segment aggregates for side-by-side comparisons
+branch_segment_perf = {}
+branch_segment_rec_counts = {}
+branch_segment_rec_reasons = {}
+segments = [s for s in df['Segment'].dropna().unique()]
+for branch, g_branch in df.groupby(branch_col):
+    branch_segment_perf[branch] = {}
+    branch_segment_rec_counts[branch] = {}
+    branch_segment_rec_reasons[branch] = {}
+    for seg, g in g_branch.groupby('Segment'):
+        branch_segment_perf[branch][seg] = {
+            'count': int(len(g)),
+            'subject_avg': float(g['Subject_Avg'].mean()),
+            'environment_avg': float(g['Environment_Avg'].mean()),
+            'infrastructure_avg': float(g['Infrastructure_Avg'].mean()),
+            'parent_teacher_avg': float(g['Parent_Teacher_Avg'].mean()),
+            'admin_avg': float(g['Admin_Avg'].mean()),
+            'overall_avg': float(g['Overall_Avg'].mean())
+        }
+        counts = {'Yes': 0, 'No': 0, 'Maybe': 0, 'Not Applicable': 0}
+        if 'recommend_cols' in globals() and recommend_cols:
+            for col in recommend_cols:
+                mapped = g[col].apply(classify_ynm)
+                vc = mapped.value_counts()
+                for k, v in vc.items():
+                    if k in counts:
+                        counts[k] += int(v)
+        branch_segment_rec_counts[branch][seg] = counts
+        rec_col = recommend_cols[0] if ('recommend_cols' in globals() and recommend_cols) else None
+        seg_reasons = { 'Yes': Counter(), 'Maybe': Counter(), 'No': Counter() }
+        if rec_col:
+            for _, row in g.iterrows():
+                status = classify_ynm(row.get(rec_col))
+                if status not in seg_reasons:
+                    continue
+                cols = sat_cols if status == 'Yes' else improve_cols
+                reasons = []
+                for c in cols:
+                    reasons.extend(parse_reasons(row.get(c)))
+                buckets = [bucket_reason(r) for r in reasons]
+                for b in buckets:
+                    seg_reasons[status][b] += 1
+        branch_segment_rec_reasons[branch][seg] = {
+            'Yes': reasons_to_top(seg_reasons['Yes']),
+            'Maybe': reasons_to_top(seg_reasons['Maybe']),
+            'No': reasons_to_top(seg_reasons['No'])
+        }
+
+stats['branch_segment_performance'] = branch_segment_perf
+stats['branch_segment_recommendation_counts'] = branch_segment_rec_counts
+stats['branch_segment_recommendation_reasons'] = branch_segment_rec_reasons
+
+# Fallback post-processing: compute averages from distributions if missing
+def weighted_avg_from_distribution(dist_obj):
+    if not isinstance(dist_obj, dict):
+        return None
+    e=g=a=n2=p=0
+    for k, v in dist_obj.items():
+        try:
+            val = int(v) if v is not None else 0
+        except Exception:
+            continue
+        low = str(k).lower()
+        lownorm = re.sub(r"[\s./-]", '', low)
+        if 'not applicable' in low or 'பொருந்தாது' in low or low in ('na','n/a','n.a') or lownorm=='notapplicable':
+            continue
+        if 'excellent' in low or 'மிகநன்று' in low or 'மிக நன்று' in low:
+            e += val
+        elif 'good' in low or 'நன்று' in low:
+            g += val
+        elif 'average' in low or 'satisfactory' in low or 'சராசரி' in low or 'திருப்தி' in low:
+            a += val
+        elif 'need' in low or 'needs' in low or 'improve' in low or 'முன்னேற்றம்' in low:
+            n2 += val
+        elif 'poor' in low or 'மோசம்' in low:
+            p += val
+    denom = e+g+a+n2+p
+    if denom <= 0:
+        return None
+    num = 5*e + 4*g + 3*a + 2*n2 + 1*p
+    return float(num/denom)
+
+# Subjects
+for name, info in list(stats.get('subject_performance', {}).items()):
+    avg = info.get('average')
+    if avg is None or (isinstance(avg, float) and np.isnan(avg)):
+        dist = info.get('rating_distribution') or {}
+        wa = weighted_avg_from_distribution(dist)
+        stats['subject_performance'][name]['average'] = wa
+
+# Category groups
+cat_perf = stats.get('category_performance', {})
+for grp in list(cat_perf.keys()):
+    for name, info in list(cat_perf.get(grp, {}).items()):
+        avg = info.get('average')
+        if avg is None or (isinstance(avg, float) and np.isnan(avg)):
+            dist = info.get('rating_distribution') or {}
+            wa = weighted_avg_from_distribution(dist)
+            stats['category_performance'][grp][name]['average'] = wa
+
+# Summary category scores fallback
+summary = stats.get('summary', {})
+def avg_values(d):
+    vals = [v for v in d.values() if v is not None and not (isinstance(v, float) and np.isnan(v))]
+    return float(sum(vals)/len(vals)) if vals else None
+
+if summary.get('category_scores', {}).get('Academics') in (None,) or np.isnan(summary.get('category_scores', {}).get('Academics')):
+    subj_avgs = [v.get('average') for v in (stats.get('subject_performance') or {}).values()]
+    val = avg_values({i:a for i,a in enumerate(subj_avgs) if a is not None})
+    stats['summary']['category_scores']['Academics'] = val
+
+groups_map = {
+    'Environment': 'Environment Quality',
+    'Infrastructure': 'Infrastructure',
+    'Administration': 'Administrative Support'
+}
+for key, grp in groups_map.items():
+    cs = stats['summary']['category_scores'].get(key)
+    if cs is None or (isinstance(cs, float) and np.isnan(cs)):
+        items = stats.get('category_performance', {}).get(grp, {})
+        val = avg_values({k:items[k].get('average') for k in items})
+        stats['summary']['category_scores'][key] = val
+
+# Overall avg fallback
+if stats['summary'].get('overall_avg') is None or (isinstance(stats['summary'].get('overall_avg'), float) and np.isnan(stats['summary'].get('overall_avg'))):
+    vals = [v for v in (stats['summary'].get('category_scores') or {}).values() if v is not None and not (isinstance(v, float) and np.isnan(v))]
+    stats['summary']['overall_avg'] = float(sum(vals)/len(vals)) if vals else None
 
 # Now that all aggregates are computed, clean and save JSON
 stats_clean = clean_nan(stats)
@@ -684,7 +1146,12 @@ def create_ppt_report(stats_dict, output_file):
     fill = bg.fill
     fill.solid()
     fill.fore_color.rgb = RGBColor(0, 31, 63)
-    base_dir = os.path.dirname(csv_file)
+    # Derive base_dir from first configured input file (XLSX/CSV) if available; fallback to script folder
+    try:
+        first_input = next((p for p in input_files_used if os.path.exists(p)), None)
+    except Exception:
+        first_input = None
+    base_dir = os.path.dirname(first_input) if first_input else os.path.dirname(__file__)
     # Prefer srichaitanya.jpg, fall back to common names
     for candidate in ['srichaitanya.jpg', 'logo.png', 'srichaitanya.png']:
         logo_path = os.path.join(base_dir, candidate)

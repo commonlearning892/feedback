@@ -1,0 +1,6 @@
+{
+  "name": "Local Dashboard Dev Server",
+  "url": "http://localhost:8000/",
+  "devtoolsFrontendUrl": "about:blank",
+  "description": "Placeholder to silence Chrome DevTools .well-known request on local http.server"
+}
