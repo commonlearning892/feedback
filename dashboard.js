@@ -1,6 +1,10 @@
+let RAW_DATA = null;
+let CURRENT_BRANCH = '';
+
 fetch('feedback_stats.json')
     .then(response => response.json())
     .then(data => {
+        RAW_DATA = data;
         renderDashboard(data);
     })
     .catch(error => {
@@ -8,16 +12,622 @@ fetch('feedback_stats.json')
         document.getElementById('content').innerHTML = '<h2>Error loading data</h2>';
     });
 
+// Apply responsive Chart.js font sizes based on viewport
+function applyResponsiveChartDefaults() {
+    const w = window.innerWidth || 1024;
+    let base = 12;
+    if (w < 360) base = 9;
+    else if (w < 480) base = 10;
+    else if (w < 768) base = 11;
+    else if (w > 1440) base = 14;
+    if (window.Chart && Chart.defaults) {
+        Chart.defaults.font = Chart.defaults.font || {};
+        Chart.defaults.font.size = base;
+        Chart.defaults.plugins = Chart.defaults.plugins || {};
+        Chart.defaults.plugins.legend = Chart.defaults.plugins.legend || {};
+        Chart.defaults.plugins.legend.labels = Chart.defaults.plugins.legend.labels || {};
+        Chart.defaults.plugins.legend.labels.font = Chart.defaults.plugins.legend.labels.font || {};
+        Chart.defaults.plugins.legend.labels.font.size = base;
+        Chart.defaults.scale = Chart.defaults.scale || {};
+        Chart.defaults.scale.ticks = Chart.defaults.scale.ticks || {};
+        Chart.defaults.scale.ticks.font = Chart.defaults.scale.ticks.font || {};
+        Chart.defaults.scale.ticks.font.size = Math.max(9, base - 1);
+    }
+}
+
+let __resizeTimer = null;
+window.addEventListener('resize', () => {
+    if (__resizeTimer) clearTimeout(__resizeTimer);
+    __resizeTimer = setTimeout(() => {
+        applyResponsiveChartDefaults();
+        const view = deriveViewData(RAW_DATA, CURRENT_BRANCH);
+        renderAllSections(view);
+        renderComparison(view);
+        sanitizeDisplayedText();
+    }, 250);
+});
+
+// Build a branch-specific data view from the global dataset
+function deriveViewData(data, branch) {
+    if (!branch) return data;
+    const bp = data.branch_performance?.[branch];
+    if (!bp) return data;
+    const recCounts = (data.branch_recommendation_counts?.[branch]) || {};
+    const yes = recCounts['Yes'] || 0, no = recCounts['No'] || 0, maybe = recCounts['Maybe'] || 0;
+    const totalRec = yes + no + maybe;
+    const yesPct = totalRec > 0 ? (yes / totalRec * 100.0) : null;
+    let recReasons = null;
+    try {
+        const bySeg = data.branch_segment_recommendation_reasons?.[branch] || {};
+        const aggKind = (kind) => {
+            const counts = {};
+            let total = 0;
+            for (const seg of Object.keys(bySeg)) {
+                const obj = bySeg[seg]?.[kind] || {};
+                const arr = Array.isArray(obj.top_detail) ? obj.top_detail : [];
+                for (const it of arr) {
+                    const label = Array.isArray(it) ? it[0] : null;
+                    const c = Array.isArray(it) ? (Number(it[1])||0) : 0;
+                    if (!label) continue;
+                    counts[label] = (counts[label]||0) + c;
+                    total += c;
+                }
+            }
+            const sorted = Object.entries(counts).sort((a,b)=> b[1]-a[1]).slice(0,10);
+            const top_detail = sorted.map(([l,c])=> [l, c, total? Math.round(c*1000/total)/10 : 0]);
+            const top = top_detail.map(([l,,p])=> [l, p]);
+            return { total_reasons: total, top, top_detail };
+        };
+        const yesAgg = aggKind('Yes');
+        const noAgg = aggKind('No');
+        recReasons = { Yes: yesAgg, No: noAgg };
+    } catch(_) {}
+    return {
+        summary: {
+            total_responses: bp.count || 0,
+            overall_avg: bp.overall_avg ?? null,
+            category_scores: {
+                'Academics': bp.subject_avg ?? null,
+                'Environment': bp.environment_avg ?? null,
+                'Infrastructure': bp.infrastructure_avg ?? null,
+                'Administration': bp.admin_avg ?? null,
+            }
+        },
+        recommendation: { distribution: recCounts, yes_pct: yesPct },
+        recommendation_reasons: recReasons || data.recommendation_reasons || {},
+        subject_performance: data.branch_subject_performance?.[branch] || {},
+        category_performance: data.branch_category_performance?.[branch] || {},
+        teaching_indicators: data.teaching_indicators_by_branch?.[branch] || data.teaching_indicators || {},
+        ptm_effectiveness: data.ptm_effectiveness_by_branch?.[branch] ?? data.ptm_effectiveness ?? null,
+        communication_metrics: data.communication_metrics_by_branch?.[branch] || data.communication_metrics || {},
+        environment_focus: data.environment_focus_by_branch?.[branch] || data.environment_focus || {},
+        concern_roles: data.concern_roles_by_branch?.[branch] || data.concern_roles || {},
+        concern_resolution: data.branch_concern_resolution?.[branch] || data.concern_resolution || {},
+        // keep global sets for branch comparison section
+        rankings: data.rankings,
+        branch_performance: data.branch_performance,
+        branch_recommendation_pct: data.branch_recommendation_pct,
+        branch_recommendation_counts: data.branch_recommendation_counts,
+        branch_rating_counts: data.branch_rating_counts,
+        branch_recommendation_counts_by: data.branch_recommendation_counts_by,
+        branch_rating_counts_by: data.branch_rating_counts_by,
+        summary_all: data.summary
+    };
+}
+
+// Safely recreate a canvas to force a clean Chart.js render
+function resetCanvas(id) {
+    const old = document.getElementById(id);
+    if (!old) return null;
+    const parent = old.parentNode;
+    const c = old.cloneNode(false);
+    parent.replaceChild(c, old);
+    return c.getContext('2d');
+}
+
+// Normalize any label to English by removing Tamil script and bracketed Tamil segments
+function toEnglishLabel(s) {
+    if (s == null) return s;
+    let t = String(s);
+    // Remove any parentheses group that contains Tamil characters
+    t = t.replace(/\([^)]*[\u0B80-\u0BFF][^)]*\)/g, '');
+    // Also remove parenthesized segments that contain high-ASCII mojibake
+    t = t.replace(/\([^)]*[\x80-\xFF][^)]*\)/g, '');
+    // Remove any remaining Tamil characters and high-ASCII mojibake
+    t = t.replace(/[\u0B80-\u0BFF]/g, '');
+    t = t.replace(/[\x80-\xFF]/g, '');
+    // Normalize dashes and whitespace
+    t = t.replace(/[–—]/g, '-');
+    // Remove empty parentheses created by stripping
+    t = t.replace(/\(\s*\)/g, '');
+    t = t.replace(/\s{2,}/g, ' ').trim();
+    // Clean trailing punctuation artifacts
+    t = t.replace(/\s*[:;,-]\s*$/, '');
+    // Fallback: if everything was stripped, return original to avoid empty labels
+    return t || String(s);
+}
+
+// Post-render sanitizer: strip Tamil segments from any remaining displayed text nodes
+function sanitizeDisplayedText(root=document) {
+    try {
+        const nodes = root.querySelectorAll('td, th, option, label, h2, .kpi .label, .reason-list li span:first-child');
+        nodes.forEach(n => {
+            if (n && typeof n.textContent === 'string') {
+                const cleaned = toEnglishLabel(n.textContent);
+                if (cleaned !== n.textContent) n.textContent = cleaned;
+            }
+        });
+    } catch (_) {}
+}
+
+// Helper: approximate respondent count (n) for a given item label by scanning category_performance
+function findItemCountInCategories(data, label) {
+    try {
+        const norm = toEnglishLabel(label).toLowerCase();
+        const catPerf = data?.category_performance || {};
+        for (const [, items] of Object.entries(catPerf)) {
+            for (const [name, obj] of Object.entries(items || {})) {
+                const nm = toEnglishLabel(name).toLowerCase();
+                if (!nm) continue;
+                if (nm === norm || nm.includes(norm) || norm.includes(nm)) {
+                    const dist = obj?.rating_distribution || {};
+                    let total = 0;
+                    for (const v of Object.values(dist)) total += (v || 0);
+                    if (total > 0) return total;
+                }
+            }
+        }
+    } catch (_) {}
+    return null;
+}
+
+// Render all primary sections (except the global branch comparison)
+function renderAllSections(viewData) {
+    renderExecutiveSummary(viewData);
+    renderAcademicSection(viewData);
+    renderEnvironmentSection(viewData);
+    renderCommunicationSection(viewData);
+    renderInfrastructureSection(viewData);
+    renderStrengthsSection(viewData);
+    // Always call to update visibility; the renderer will short-circuit when a branch is selected
+    try { renderBranchComparisonSection(RAW_DATA); } catch (_) {}
+}
+
+// Create collapsible toggles for each section and wire expand/collapse buttons
+function initAccordion() {
+    const titles = {
+        'section-exec': 'Executive Summary',
+        'section-academic': 'Academic Quality',
+        'section-env': 'Environment & Safety',
+        'section-comm': 'Communication & Administration',
+        'section-infra': 'Infrastructure & Facilities',
+        'section-strengths': 'Strengths & Improvements',
+        'section-branch': 'Branch Comparison'
+    };
+    document.querySelectorAll('.section').forEach(sec => {
+        if (sec.querySelector('.section-toggle')) return;
+        const id = sec.id;
+        const toggle = document.createElement('div');
+        toggle.className = 'section-toggle';
+        toggle.innerHTML = `<span>${titles[id] || id}</span><span>▼</span>`;
+        const content = document.createElement('div');
+        content.className = 'section-content';
+        while (sec.firstChild) content.appendChild(sec.firstChild);
+        sec.appendChild(toggle);
+        sec.appendChild(content);
+        toggle.addEventListener('click', ()=> sec.classList.toggle('collapsed'));
+    });
+    const exp = document.getElementById('expandAllBtn');
+    const col = document.getElementById('collapseAllBtn');
+    if (exp) exp.addEventListener('click', ()=> document.querySelectorAll('.section').forEach(s=> s.classList.remove('collapsed')));
+    if (col) col.addEventListener('click', ()=> document.querySelectorAll('.section').forEach(s=> s.classList.add('collapsed')));
+}
+
+// Populate global branch selector and re-render on change
+function initGlobalBranchSelector(data) {
+    const sel = document.getElementById('globalBranchSelect');
+    if (!sel) return;
+    const branches = Object.keys(data.summary?.branches || {}).sort();
+    // only populate once
+    if (sel.options.length <= 1) {
+        branches.forEach(b => { const o = document.createElement('option'); o.value = b; o.textContent = toEnglishLabel(b); sel.appendChild(o); });
+    }
+    sel.addEventListener('change', () => {
+        CURRENT_BRANCH = sel.value || '';
+        const view = deriveViewData(RAW_DATA, CURRENT_BRANCH);
+        renderAllSections(view);
+        // Auto-enable Segment comparison for simplicity
+        const cmp = document.getElementById('compareBySelect');
+        if (cmp) {
+            cmp.value = 'segment';
+            cmp.dispatchEvent(new Event('change'));
+        } else {
+            renderComparison(view);
+        }
+    });
+    // Default remains "All Branches" (no auto-select)
+}
+
 function renderDashboard(data) {
+    applyResponsiveChartDefaults();
     initTabs();
+    initAccordion();
     populateFilters(data);
-    renderExecutiveSummary(data);
-    renderAcademicSection(data);
-    renderEnvironmentSection(data);
-    renderCommunicationSection(data);
-    renderInfrastructureSection(data);
-    renderStrengthsSection(data);
-    renderBranchComparisonSection(data);
+    // Initialize compare controls first so branch-change can use them
+    initCompareControls();
+    initGlobalBranchSelector(data);
+    const view = deriveViewData(data, CURRENT_BRANCH);
+    renderAllSections(view);
+    renderComparison(view);
+    sanitizeDisplayedText();
+}
+
+function getCompareBy() {
+    const sel = document.getElementById('compareBySelect');
+    return sel ? sel.value : 'none';
+}
+
+function ensureCompareArea(sectionId) {
+    const sec = document.getElementById(sectionId);
+    if (!sec) return null;
+    const content = sec.querySelector('.section-content') || sec; // fallback if accordion not applied
+    let area = content.querySelector('.compare-area');
+    if (!area) {
+        area = document.createElement('div');
+        area.className = 'compare-area';
+        area.style.display = 'grid';
+        area.style.gridTemplateColumns = 'repeat(auto-fit, minmax(300px, 1fr))';
+        area.style.gap = '14px';
+        area.style.margin = '10px 0 18px';
+        content.insertBefore(area, content.firstChild);
+    }
+    area.innerHTML = '';
+    return area;
+}
+
+function initCompareControls() {
+    const cmpSel = document.getElementById('compareBySelect');
+    const segWrap = document.getElementById('segmentChecks');
+    if (!cmpSel) return;
+    const rebuildSegChecks = () => {
+        if (!segWrap) return;
+        const br = CURRENT_BRANCH || Object.keys(RAW_DATA?.branch_segment_performance || {})[0];
+        const segs = Object.keys(RAW_DATA?.branch_segment_performance?.[br] || {});
+        segWrap.style.display = (cmpSel.value === 'segment') ? 'inline-flex' : 'none';
+        segWrap.innerHTML = '';
+        if (cmpSel.value === 'segment') {
+            segs.forEach((s, idx) => {
+                const id = `segchk_${s.replace(/[^a-z0-9]/gi,'_').toLowerCase()}`;
+                const lbl = document.createElement('label');
+                lbl.style.display = 'inline-flex';
+                lbl.style.alignItems = 'center';
+                lbl.style.gap = '6px';
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.id = id; cb.value = s; cb.checked = true;
+                cb.addEventListener('change', ()=> renderComparison(deriveViewData(RAW_DATA, CURRENT_BRANCH)));
+                lbl.appendChild(cb);
+                const span = document.createElement('span'); span.textContent = toEnglishLabel(s); lbl.appendChild(span);
+                segWrap.appendChild(lbl);
+            });
+        }
+    };
+    cmpSel.addEventListener('change', () => { rebuildSegChecks(); renderComparison(deriveViewData(RAW_DATA, CURRENT_BRANCH)); });
+    // rebuild when branch changes as well
+    const branchSel = document.getElementById('globalBranchSelect');
+    if (branchSel) branchSel.addEventListener('change', rebuildSegChecks);
+    rebuildSegChecks();
+}
+
+function selectedSegments() {
+    const segWrap = document.getElementById('segmentChecks');
+    if (!segWrap) return [];
+    const cbs = Array.from(segWrap.querySelectorAll('input[type="checkbox"]'));
+    const vals = cbs.filter(cb => cb.checked).map(cb => cb.value);
+    return vals.length ? vals : cbs.map(cb => cb.value);
+}
+
+function renderComparison(view) {
+    const by = getCompareBy();
+    // Clear any existing compare areas
+    document.querySelectorAll('.compare-area').forEach(n => n.remove());
+    if (by === 'none') return;
+
+    if (!CURRENT_BRANCH) return; // require a branch to compare within
+
+    if (by === 'segment') {
+        renderSegmentComparison();
+    } else if (by === 'class' || by === 'orientation') {
+        renderGroupComparison(by);
+    }
+    sanitizeDisplayedText();
+}
+
+// Render simple 3-bar chart for Segment Overall within selected branch
+function aggregateSegments(branch) {
+    const order = ['Pre Primary','Primary','High School'];
+    const perfByBranch = RAW_DATA?.branch_segment_performance || {};
+    const recByBranch = RAW_DATA?.branch_segment_recommendation_counts || {};
+    const result = {};
+    if (branch) {
+        const p = perfByBranch[branch] || {};
+        const r = recByBranch[branch] || {};
+        order.forEach(seg => {
+            if (!p[seg] && !r[seg]) return;
+            const pc = p[seg] || {};
+            const rc = r[seg] || {};
+            result[seg] = {
+                count: pc.count || ((rc.Yes||0)+(rc.No||0)+(rc.Maybe||0)+(rc['Not Applicable']||0)),
+                overall_avg: (pc.overall_avg!=null && !isNaN(pc.overall_avg)) ? pc.overall_avg : null,
+                rec: { Yes: rc.Yes||0, No: rc.No||0, Maybe: rc.Maybe||0 }
+            };
+        });
+        return result;
+    }
+    // Aggregate across all branches
+    for (const [br, segs] of Object.entries(perfByBranch)) {
+        for (const [seg, vals] of Object.entries(segs)) {
+            if (!result[seg]) result[seg] = { count: 0, overall_wsum: 0, overall_avg: null, rec: { Yes:0, No:0, Maybe:0 } };
+            const rc = ((recByBranch[br]||{})[seg]) || {};
+            const c = vals.count || ((rc.Yes||0)+(rc.No||0)+(rc.Maybe||0)+(rc['Not Applicable']||0)) || 0;
+            result[seg].count += c;
+            if (vals.overall_avg!=null && !isNaN(vals.overall_avg) && c) result[seg].overall_wsum += vals.overall_avg * c;
+        }
+    }
+    for (const [, segs] of Object.entries(recByBranch)) {
+        for (const [seg, rc] of Object.entries(segs)) {
+            if (!result[seg]) result[seg] = { count: 0, overall_wsum: 0, overall_avg: null, rec: { Yes:0, No:0, Maybe:0 } };
+            result[seg].rec.Yes += rc.Yes || 0;
+            result[seg].rec.No += rc.No || 0;
+            result[seg].rec.Maybe += rc.Maybe || 0;
+        }
+    }
+    Object.keys(result).forEach(seg => {
+        const c = result[seg].count || 0;
+        result[seg].overall_avg = c ? (result[seg].overall_wsum / c) : null;
+    });
+    return result;
+}
+
+function renderSegmentOverallChart() {
+    const order = ['Pre Primary','Primary','High School'];
+    const agg = aggregateSegments(CURRENT_BRANCH);
+    const labels = order.filter(s => agg[s]);
+    const el = document.getElementById('segmentOverallChart');
+    if (!el || !labels.length) return;
+    const values = labels.map(s => (agg[s].overall_avg==null || isNaN(agg[s].overall_avg)) ? 0 : agg[s].overall_avg);
+    const ctx = (typeof resetCanvas === 'function' ? resetCanvas('segmentOverallChart') : null) || el.getContext('2d');
+    new Chart(ctx, { type: 'bar', data: { labels, datasets: [{ label: 'Overall Avg', data: values, backgroundColor: ['#42a5f5','#66bb6a','#ffa726'].slice(0, labels.length) }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } } });
+}
+
+function renderSegmentCountsGrid() {
+    const grid = document.getElementById('segmentCountsGrid');
+    if (!grid) return;
+    const order = ['Pre Primary','Primary','High School'];
+    const agg = aggregateSegments(CURRENT_BRANCH);
+    const segs = order.filter(s => agg[s]);
+    grid.innerHTML = segs.map(s => {
+        const d = agg[s];
+        const total = d.count || 0;
+        const y = d.rec?.Yes || 0, n = d.rec?.No || 0, m = d.rec?.Maybe || 0;
+        const den = y + n + m;
+        const pct = (v) => den ? ` (${(v/den*100).toFixed(1)}%)` : '';
+        return `
+            <div class="kpi"><div class="label">${toEnglishLabel(s)} — Responses</div><div class="value">${(total||0).toLocaleString()}</div></div>
+            <div class="kpi"><div class="label">${toEnglishLabel(s)}: Yes</div><div class="value">${y.toLocaleString()}${pct(y)}</div></div>
+            <div class="kpi"><div class="label">${toEnglishLabel(s)}: No</div><div class="value">${n.toLocaleString()}${pct(n)}</div></div>
+            <div class="kpi"><div class="label">${toEnglishLabel(s)}: Maybe</div><div class="value">${m.toLocaleString()}${pct(m)}</div></div>
+        `;
+    }).join('');
+}
+
+function renderSegmentTotalsGrid() {
+    const grid = document.getElementById('segmentTotalsGrid');
+    if (!grid) return;
+    const order = ['Pre Primary','Primary','High School'];
+    const agg = aggregateSegments(CURRENT_BRANCH);
+    const segs = order.filter(s => agg[s]);
+    if (!segs.length) { grid.innerHTML = '<div class="kpi"><div class="label">No responses</div><div class="value">0</div></div>'; return; }
+    grid.innerHTML = segs.map(s => {
+        const d = agg[s];
+        const total = d.count || 0;
+        return `<div class="kpi"><div class="label">${s} — Total Responses</div><div class="value">${(total||0).toLocaleString()}</div></div>`;
+    }).join('');
+}
+
+function renderSegmentYNMChart() {
+    const canvas = document.getElementById('segmentYNMChart');
+    if (!canvas) return;
+    const order = ['Pre Primary','Primary','High School'];
+    const agg = aggregateSegments(CURRENT_BRANCH);
+    const labels = order.filter(s => agg[s]);
+    if (!labels.length) return;
+    const yes = labels.map(l => (agg[l].rec?.Yes||0));
+    const maybe = labels.map(l => (agg[l].rec?.Maybe||0));
+    const no = labels.map(l => (agg[l].rec?.No||0));
+    const ctx = (typeof resetCanvas === 'function' ? resetCanvas('segmentYNMChart') : null) || canvas.getContext('2d');
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                { label: 'Yes', data: yes, backgroundColor: '#43a047', stack: 'ynm' },
+                { label: 'Maybe', data: maybe, backgroundColor: '#fb8c00', stack: 'ynm' },
+                { label: 'No', data: no, backgroundColor: '#e53935', stack: 'ynm' }
+            ]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+                x: { stacked: true, beginAtZero: true },
+                y: { stacked: true }
+            }
+        }
+    });
+}
+
+function card(title) {
+    const d = document.createElement('div');
+    d.className = 'chart-container';
+    const h = document.createElement('h2'); h.textContent = title; d.appendChild(h);
+    return d;
+}
+
+function renderSegmentComparison() {
+    const perf = RAW_DATA?.branch_segment_performance?.[CURRENT_BRANCH] || {};
+    const recs = RAW_DATA?.branch_segment_recommendation_counts?.[CURRENT_BRANCH] || {};
+    const reasons = RAW_DATA?.branch_segment_recommendation_reasons?.[CURRENT_BRANCH] || {};
+    const segs = selectedSegments().filter(s => perf[s]);
+    if (!segs.length) return;
+
+    // Executive Summary overlay: per-segment KPI + donut + reasons
+    const area = ensureCompareArea('section-exec');
+    if (area) {
+        // Aggregated Recommendations (across all selected segments)
+        try {
+            const agg = { Yes: {}, No: {}, Maybe: {} };
+            const add = (bucket, label, count) => { agg[bucket][label] = (agg[bucket][label]||0) + count; };
+            segs.forEach(s => {
+                const rr = reasons[s] || {};
+                ['Yes','No','Maybe'].forEach(b => {
+                    const list = rr[b]?.top_detail || [];
+                    list.forEach(([label, count]) => add(b, label, Number(count)||0));
+                });
+            });
+            const toTop = (obj) => Object.entries(obj).sort((a,b)=> b[1]-a[1]).slice(0,6);
+            const topYes = toTop(agg.Yes);
+            const topImprove = toTop(Object.keys(agg.No).concat(Object.keys(agg.Maybe)).reduce((acc,k)=>{ acc[k]=(agg.No[k]||0)+(agg.Maybe[k]||0); return acc; }, {}));
+            const cardAgg = card(`Recommendations — ${toEnglishLabel(CURRENT_BRANCH)}`);
+            const wrapAgg = document.createElement('div'); wrapAgg.className = 'grid-2';
+            const strengths = document.createElement('div'); strengths.className = 'kpi';
+            strengths.innerHTML = `<div class="reason-title yes">Top Strengths (Why Yes)</div><ul class="reason-list">${topYes.map(([l,c])=> `<li><span>${toEnglishLabel(l)}</span><span>${c}</span></li>`).join('')}</ul>`;
+            const improv = document.createElement('div'); improv.className = 'kpi';
+            improv.innerHTML = `<div class=\"reason-title no\">Top Improvements (Why No/Maybe)</div><ul class=\"reason-list\">${topImprove.map(([l,c])=> `<li><span>${toEnglishLabel(l)}</span><span>${c}</span></li>`).join('')}</ul>`;
+            wrapAgg.appendChild(strengths); wrapAgg.appendChild(improv); cardAgg.appendChild(wrapAgg); area.appendChild(cardAgg);
+        } catch (_e) {}
+
+        segs.forEach((s, idx) => {
+            const p = perf[s] || {};
+            const r = recs[s] || {};
+            const total = (r.Yes||0)+(r.No||0)+(r.Maybe||0);
+            const yesPct = total ? (r.Yes*100/total) : 0;
+            const c = card(`${toEnglishLabel(s)} — ${toEnglishLabel(CURRENT_BRANCH)}`);
+            const k = document.createElement('div');
+            k.className = 'kpi-grid';
+            k.innerHTML = `
+                <div class="kpi"><div class="label">Responses</div><div class="value">${(p.count||0).toLocaleString()}</div></div>
+                <div class="kpi"><div class="label">Overall</div><div class="value">${p.overall_avg? (p.overall_avg/5*100).toFixed(1)+'%':'-'}</div></div>
+                <div class="kpi"><div class="label">Academics</div><div class="value">${p.subject_avg? p.subject_avg.toFixed(2):'-'}</div></div>
+                <div class="kpi"><div class="label">Environment</div><div class="value">${p.environment_avg? p.environment_avg.toFixed(2):'-'}</div></div>
+                <div class="kpi"><div class="label">Infrastructure</div><div class="value">${p.infrastructure_avg? p.infrastructure_avg.toFixed(2):'-'}</div></div>
+                <div class="kpi"><div class="label">Admin</div><div class="value">${p.admin_avg? p.admin_avg.toFixed(2):'-'}</div></div>
+                <div class="kpi"><div class="label">% Recommend</div><div class="value">${yesPct.toFixed(1)}%</div></div>`;
+            c.appendChild(k);
+            const row = document.createElement('div'); row.className = 'chart-row';
+            const wrap = document.createElement('div'); wrap.className = 'chart-wrapper';
+            const canvas = document.createElement('canvas'); const cid = `segdonut_${idx}`; canvas.id = cid; wrap.appendChild(canvas);
+            row.appendChild(wrap);
+            const side = document.createElement('div'); side.className = 'side-kpi';
+            const listCard = document.createElement('div'); listCard.className = 'kpi';
+            const title = document.createElement('div'); title.className = 'label'; title.textContent = 'Reasons (Top votes)'; listCard.appendChild(title);
+            const ul = document.createElement('ul'); ul.style.listStyle='none'; ul.style.padding='0';
+            const rrYes = reasons[s]?.Yes?.top_detail || [];
+            const rrNo = reasons[s]?.No?.top_detail || [];
+            const build = (arr, hdr) => `<li style="font-weight:700;margin-top:6px;">${hdr}</li>` + arr.map(([label,count,pct])=> `<li style=\"display:flex;justify-content:space-between;\"><span>${toEnglishLabel(label)}</span><span>${count} (${pct}%)</span></li>`).join('');
+            ul.innerHTML = build(rrYes, 'Why Yes') + build(rrNo, 'Why No');
+            listCard.appendChild(ul);
+            side.appendChild(listCard);
+            row.appendChild(side);
+            c.appendChild(row);
+            area.appendChild(c);
+            // chart
+            const ctx = canvas.getContext('2d');
+            new Chart(ctx, { type: 'doughnut', data: { labels: ['Yes','No','Maybe'], datasets: [{ data: [r.Yes||0, r.No||0, r.Maybe||0], backgroundColor: ['#43a047','#e53935','#fb8c00'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } } });
+        });
+    }
+
+    // Add compact per-section segment cards
+    addSegmentCards('section-academic', segs, perf, 'subject_avg', '%SEG% — Academics');
+    addSegmentCards('section-env', segs, perf, 'environment_avg', '%SEG% — Environment');
+    addSegmentCards('section-comm', segs, perf, 'admin_avg', '%SEG% — Admin Support');
+    addSegmentCards('section-infra', segs, perf, 'infrastructure_avg', '%SEG% — Infrastructure');
+    addSegmentCards('section-strengths', segs, perf, 'overall_avg', '%SEG% — Overall');
+}
+
+function addSegmentCards(sectionId, segs, perf, metricKey, titleFmt) {
+    const area2 = ensureCompareArea(sectionId);
+    if (!area2) return;
+    segs.forEach((s) => {
+        const p = perf[s] || {};
+        const val = p[metricKey];
+        const c = card(titleFmt.replace('%SEG%', toEnglishLabel(s)));
+        const k = document.createElement('div'); k.className = 'kpi-grid';
+        k.innerHTML = `
+            <div class="kpi"><div class="label">Responses</div><div class="value">${(p.count||0).toLocaleString()}</div></div>
+            <div class="kpi"><div class="label">${metricKey.replace('_',' ')}</div><div class="value">${val? val.toFixed(2):'-'}</div></div>`;
+        c.appendChild(k);
+        area2.appendChild(c);
+    });
+}
+
+function renderGroupComparison(kind) {
+    // kind in ['class','orientation']
+    const area = ensureCompareArea('section-branch') || ensureCompareArea('section-exec');
+    if (!area) return;
+    const br = CURRENT_BRANCH;
+    const recBy = RAW_DATA?.branch_recommendation_counts_by?.[kind] || {};
+    const ratingBy = RAW_DATA?.branch_rating_counts_by?.[kind] || {};
+    let keys = Object.keys(recBy);
+    // Keep only those where current branch has data
+    keys = keys.filter(k => recBy[k] && recBy[k][br]);
+    // Custom sort depending on kind
+    if (kind === 'class') {
+        const pref = ['IK-2','IK2','IK-1','IK1','Pre-K','LKG','UKG'];
+        keys.sort((a,b)=>{
+            const norm = s=> String(s);
+            const ia = pref.findIndex(p=> norm(a).toUpperCase().includes(p.toUpperCase()));
+            const ib = pref.findIndex(p=> norm(b).toUpperCase().includes(p.toUpperCase()));
+            if (ia!==-1 || ib!==-1) return (ia===-1? 999:ia) - (ib===-1? 999:ib);
+            return a.localeCompare(b);
+        });
+    } else if (kind === 'orientation') {
+        const prefO = ['Techno','Star','Maverick','Maverics'];
+        keys.sort((a,b)=>{
+            const norm = s=> String(s);
+            const ia = prefO.findIndex(p=> norm(a).toUpperCase().includes(p.toUpperCase()));
+            const ib = prefO.findIndex(p=> norm(b).toUpperCase().includes(p.toUpperCase()));
+            if (ia!==-1 || ib!==-1) return (ia===-1? 999:ia) - (ib===-1? 999:ib);
+            return a.localeCompare(b);
+        });
+    } else {
+        keys.sort();
+    }
+    keys.forEach((k, idx) => {
+        const c = card(`${toEnglishLabel(k)} — ${toEnglishLabel(br)}`);
+        const rec = recBy[k]?.[br] || {};
+        const total = (rec.Yes||0)+(rec.No||0)+(rec.Maybe||0);
+        const yesPct = total? (rec.Yes*100/total):0;
+        const grid = document.createElement('div'); grid.className = 'kpi-grid';
+        grid.innerHTML = `
+            <div class="kpi"><div class="label">Yes</div><div class="value">${(rec.Yes||0).toLocaleString()}</div></div>
+            <div class="kpi"><div class="label">No</div><div class="value">${(rec.No||0).toLocaleString()}</div></div>
+            <div class="kpi"><div class="label">Maybe</div><div class="value">${(rec.Maybe||0).toLocaleString()}</div></div>
+            <div class="kpi"><div class="label">% Recommend</div><div class="value">${yesPct.toFixed(1)}%</div></div>`;
+        c.appendChild(grid);
+        const groups = ['Subjects','Environment','Infrastructure','Parent-Teacher','Administrative Support'];
+        const table = document.createElement('table'); table.className = 'ranking-table';
+        const counts = ratingBy[k]?.[br] || {};
+        const rows = groups.map(g=>{
+            const grp = counts[g] || {}; const ex = grp.Excellent||0, gd = grp.Good||0, av = grp.Average||0, pr = grp.Poor||0; const tot = ex+gd+av+pr;
+            return `<tr><td>${g}</td><td>${ex}</td><td>${gd}</td><td>${av}</td><td>${pr}</td><td>${tot}</td></tr>`;
+        }).join('');
+        table.innerHTML = `<thead><tr><th>Group</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Total</th></tr></thead><tbody>${rows}</tbody>`;
+        c.appendChild(table);
+        area.appendChild(c);
+    });
 }
 
 function renderBranchRankings(data) {
@@ -27,7 +637,7 @@ function renderBranchRankings(data) {
     branches.forEach((b, i) => {
         const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `#${i + 1}`;
         const scoreClass = b[1] >= 4.5 ? 'score-excellent' : b[1] >= 3.5 ? 'score-good' : 'score-average';
-        html += `<tr><td>${medal}</td><td>${b[0]}</td><td><span class="score-badge ${scoreClass}">${b[1].toFixed(2)}</span></td><td>${b[2]}</td></tr>`;
+        html += `<tr><td>${medal}</td><td>${toEnglishLabel(b[0])}</td><td><span class="score-badge ${scoreClass}">${b[1].toFixed(2)}</span></td><td>${b[2]}</td></tr>`;
     });
     table.innerHTML = html + '</tbody>';
 }
@@ -39,7 +649,7 @@ function renderOrientationRankings(data) {
     rankings.forEach((item, idx) => {
         const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
         const scoreClass = item[1] >= 4.5 ? 'score-excellent' : item[1] >= 3.5 ? 'score-good' : 'score-average';
-        html += `<tr><td>${medal}</td><td>${item[0]}</td><td><span class="score-badge ${scoreClass}">${item[1].toFixed(2)}</span></td><td>${item[2]}</td></tr>`;
+        html += `<tr><td>${medal}</td><td>${toEnglishLabel(item[0])}</td><td><span class="score-badge ${scoreClass}">${item[1].toFixed(2)}</span></td><td>${item[2]}</td></tr>`;
     });
     table.innerHTML = html + '</tbody>';
 }
@@ -51,7 +661,7 @@ function renderClassRankings(data) {
     rankings.forEach((item, idx) => {
         const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
         const scoreClass = item[1] >= 4.5 ? 'score-excellent' : item[1] >= 3.5 ? 'score-good' : 'score-average';
-        html += `<tr><td>${medal}</td><td>${item[0]}</td><td><span class="score-badge ${scoreClass}">${item[1].toFixed(2)}</span></td><td>${item[2]}</td></tr>`;
+        html += `<tr><td>${medal}</td><td>${toEnglishLabel(item[0])}</td><td><span class="score-badge ${scoreClass}">${item[1].toFixed(2)}</span></td><td>${item[2]}</td></tr>`;
     });
     table.innerHTML = html + '</tbody>';
 }
@@ -63,7 +673,7 @@ function renderSubjectRankings(data) {
     subjects.forEach((item, idx) => {
         const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
         const scoreClass = item[1] >= 4.5 ? 'score-excellent' : item[1] >= 3.5 ? 'score-good' : 'score-average';
-        html += `<tr><td>${medal}</td><td>${item[0]}</td><td><span class="score-badge ${scoreClass}">${item[1].toFixed(2)}</span></td></tr>`;
+        html += `<tr><td>${medal}</td><td>${toEnglishLabel(item[0])}</td><td><span class="score-badge ${scoreClass}">${item[1].toFixed(2)}</span></td></tr>`;
     });
     table.innerHTML = html + '</tbody>';
 }
@@ -74,7 +684,7 @@ function renderBranchChart(data) {
     new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: branches.map(b => b[0].substring(0, 20)),
+            labels: branches.map(b => toEnglishLabel(b[0]).substring(0, 20)),
             datasets: [{
                 label: 'Score',
                 data: branches.map(b => b[1]),
@@ -94,8 +704,9 @@ function renderBranchChart(data) {
 function renderOrientationChart(data) {
     const ctx = document.getElementById('orientationChart').getContext('2d');
     const counts = data.summary.orientations || {};
-    const labels = Object.keys(counts);
-    const values = labels.map(l => counts[l]);
+    const orig = Object.keys(counts);
+    const labels = orig.map(l => toEnglishLabel(l));
+    const values = orig.map(l => counts[l]);
     new Chart(ctx, {
         type: 'doughnut',
         data: {
@@ -120,7 +731,7 @@ function renderSubjectChart(data) {
     new Chart(ctx, {
         type: 'radar',
         data: {
-            labels: Object.keys(subjects),
+            labels: Object.keys(subjects).map(toEnglishLabel),
             datasets: [{
                 label: 'Score',
                 data: Object.values(subjects).map(s => s.average),
@@ -140,8 +751,9 @@ function renderSubjectChart(data) {
 function renderClassChart(data) {
     const ctx = document.getElementById('classDistChart').getContext('2d');
     const counts = data.summary.classes || {};
-    const labels = Object.keys(counts);
-    const values = labels.map(l => counts[l]);
+    const orig = Object.keys(counts);
+    const labels = orig.map(l => toEnglishLabel(l));
+    const values = orig.map(l => counts[l]);
     new Chart(ctx, {
         type: 'pie',
         data: {
@@ -167,7 +779,7 @@ function renderEnvironmentChart(data) {
     new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: metrics.map(m => m[0].substring(0, 30)),
+            labels: metrics.map(m => toEnglishLabel(m[0]).substring(0, 30)),
             datasets: [{
                 label: 'Score',
                 data: metrics.map(m => m[1].average),
@@ -190,7 +802,7 @@ function renderInfrastructureChart(data) {
     new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: metrics.map(m => m[0].substring(0, 30)),
+            labels: metrics.map(m => toEnglishLabel(m[0]).substring(0, 30)),
             datasets: [{
                 label: 'Score',
                 data: metrics.map(m => m[1].average),
@@ -213,7 +825,7 @@ function renderParentTeacherChart(data) {
     new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: metrics.map(m => m[0].substring(0, 25)),
+            labels: metrics.map(m => toEnglishLabel(m[0]).substring(0, 25)),
             datasets: [{
                 label: 'Score',
                 data: metrics.map(m => m[1].average),
@@ -233,10 +845,14 @@ function renderAdminChart(data) {
     const ctx = document.getElementById('adminChart').getContext('2d');
     const adm = (data.category_performance && data.category_performance['Administrative Support']) || {};
     const metrics = Object.entries(adm).slice(0, 6);
+    const nArr = metrics.map(([k, v]) => {
+        const dist = v?.rating_distribution || {};
+        return Object.values(dist).reduce((a,b)=>a+(b||0),0);
+    });
     new Chart(ctx, {
         type: 'bar',
         data: {
-            labels: metrics.map(m => m[0].substring(0, 25)),
+            labels: metrics.map(m => toEnglishLabel(m[0]).substring(0, 25)),
             datasets: [{
                 label: 'Score',
                 data: metrics.map(m => m[1].average),
@@ -247,7 +863,11 @@ function renderAdminChart(data) {
             indexAxis: 'y',
             responsive: true,
             maintainAspectRatio: false,
-            scales: { x: { beginAtZero: true, max: 5 } }
+            scales: { x: { beginAtZero: true, max: 5 } },
+            plugins: { tooltip: { callbacks: { label: (ctx) => {
+                const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = nArr[ctx.dataIndex] || null; const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`;
+                return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`;
+            } } } }
         }
     });
 }
@@ -275,7 +895,7 @@ function initTabs() {
 
 function populateFilters(data) {
     const addOptions = (el, items) => {
-        el.innerHTML = '<option value="all">All</option>' + items.map(v => `<option value="${v}">${v}</option>`).join('');
+        el.innerHTML = '<option value="all">All</option>' + items.map(v => `<option value="${v}">${toEnglishLabel(v)}</option>`).join('');
     };
     const branches = Object.keys(data.summary.branches || {});
     const classes = Object.keys(data.summary.classes || {});
@@ -293,15 +913,28 @@ function populateFilters(data) {
 function renderExecutiveSummary(data) {
     const kpi = document.getElementById('execKpiGrid');
     if (kpi) {
-        const overallPct = data.summary.overall_avg ? (data.summary.overall_avg / 5 * 100) : null;
-        const yesPct = data.recommendation && data.recommendation.yes_pct != null ? data.recommendation.yes_pct : null;
+        const rec = data.recommendation?.distribution || {};
+        const yes = rec['Yes'] || 0, no = rec['No'] || 0, maybe = rec['Maybe'] || 0;
+        const totalRec = yes + no + maybe;
+        const overallAvg = (data.summary && data.summary.overall_avg != null) ? data.summary.overall_avg : null;
+        const overallPct = overallAvg != null && !isNaN(overallAvg) ? (overallAvg / 5 * 100) : null;
+        const yesPct = (data.recommendation && data.recommendation.yes_pct != null) ? data.recommendation.yes_pct : (totalRec ? (yes/totalRec*100) : null);
         const acad = data.summary.category_scores?.Academics ?? null;
         const infra = data.summary.category_scores?.Infrastructure ?? null;
         const fmt = (v, p=false) => v==null || isNaN(v) ? '-' : (p ? `${v.toFixed(1)}%` : v.toFixed(2));
+        const fmtCountPct = (count, pct) => {
+            if (pct==null || isNaN(pct)) return (count||0).toLocaleString();
+            return `${(count||0).toLocaleString()} (${pct.toFixed(1)}%)`;
+        };
+        const fmtOverallPair = (avg, pct) => {
+            if (avg==null || isNaN(avg)) return '-';
+            const pctStr = (pct==null || isNaN(pct)) ? '' : ` (${pct.toFixed(1)}%)`;
+            return `${avg.toFixed(2)}/5${pctStr}`;
+        };
         kpi.innerHTML = `
-            <div class="kpi"><div class="label">Total Responses</div><div class="value">${data.summary.total_responses}</div></div>
-            <div class="kpi"><div class="label">Overall Satisfaction</div><div class="value">${fmt(overallPct, true)}</div></div>
-            <div class="kpi"><div class="label">% Recommend School</div><div class="value">${fmt(yesPct || 0, true)}</div></div>
+            <div class="kpi"><div class="label">Total Responses</div><div class="value">${(data.summary.total_responses||0).toLocaleString()}</div></div>
+            <div class="kpi"><div class="label">Overall Satisfaction</div><div class="value">${fmtOverallPair(overallAvg, overallPct)}</div></div>
+            <div class="kpi"><div class="label">Recommend School (Yes)</div><div class="value">${fmtCountPct(yes, yesPct)}</div></div>
             <div class="kpi"><div class="label">Average Academic Rating</div><div class="value">${fmt(acad)}</div></div>
             <div class="kpi"><div class="label">Average Infrastructure Rating</div><div class="value">${fmt(infra)}</div></div>
         `;
@@ -310,12 +943,36 @@ function renderExecutiveSummary(data) {
     const cat = data.summary.category_scores || {};
     const catCtx = document.getElementById('summaryCategoryChart')?.getContext('2d');
     if (catCtx) {
-        const labels = Object.keys(cat);
-        const values = labels.map(l => cat[l]);
+        const raw = Object.keys(cat);
+        const labels = raw.map(l => toEnglishLabel(l));
+        const values = raw.map(l => cat[l]);
+        // Estimate n per category from category_performance
+        const nByCat = {};
+        try {
+            const perf = data.category_performance || {};
+            for (const k of raw) {
+                let n = 0; const items = perf[k] || {};
+                for (const obj of Object.values(items)) {
+                    const dist = obj?.rating_distribution || {};
+                    for (const v of Object.values(dist)) n += (v || 0);
+                }
+                nByCat[toEnglishLabel(k)] = n || null;
+            }
+        } catch (_) {}
         new Chart(catCtx, {
             type: 'bar',
             data: { labels, datasets: [{ label: 'Avg Score', data: values, backgroundColor: 'rgba(33, 150, 243, 0.8)'}] },
-            options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } }
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { y: { beginAtZero: true, max: 5 } },
+                plugins: {
+                    tooltip: { callbacks: { label: (ctx) => {
+                        const lab = ctx.label; const val = ctx.parsed.y ?? ctx.parsed.x; const n = nByCat[lab];
+                        return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''}`;
+                    } } }
+                }
+            }
         });
     }
 
@@ -334,8 +991,10 @@ function renderExecutiveSummary(data) {
     try {
         const el = document.getElementById('recYesPctKpi');
         if (el) {
-            const pct = (data.recommendation && data.recommendation.yes_pct != null) ? data.recommendation.yes_pct : 0;
-            el.textContent = `${pct.toFixed(1)}%`;
+            const yes = rec['Yes'] || 0;
+            const total = (rec['Yes']||0) + (rec['No']||0) + (rec['Maybe']||0);
+            const pct = total ? (yes*100/total) : 0;
+            el.textContent = `${yes.toLocaleString()} (${pct.toFixed(1)}%)`;
         }
     } catch (e) { }
     // Populate recommendation counts KPIs (counts + %)
@@ -354,12 +1013,34 @@ function renderExecutiveSummary(data) {
     const fillList = (id, items) => {
         const el = document.getElementById(id);
         if (!el) return;
-        const arr = (items && items.top) ? items.top : [];
-        el.innerHTML = arr.map(([label, pct]) => `<li><span>${label}</span><span>${pct}%</span></li>`).join('');
+        let arr = [];
+        if (items && Array.isArray(items.top_detail)) {
+            arr = items.top_detail.slice(); // [label, count, pct]
+        } else if (items && Array.isArray(items.top)) {
+            arr = items.top.map(([l,p]) => [l, null, p]);
+        }
+        // Move 'Other' to bottom, then sort by pct desc
+        arr.sort((a,b) => {
+            const la = String(a[0]||'').toLowerCase();
+            const lb = String(b[0]||'').toLowerCase();
+            const isOtherA = la === 'other' || la.includes('other');
+            const isOtherB = lb === 'other' || lb.includes('other');
+            if (isOtherA !== isOtherB) return isOtherA ? 1 : -1;
+            return (b[2]||0) - (a[2]||0);
+        });
+        el.innerHTML = arr.map(([label, count, pct]) => {
+            const name = toEnglishLabel(label);
+            const pctStr = pct!=null ? `${pct}%` : '-';
+            const cnt = count!=null ? ` — ${Number(count).toLocaleString()}` : '';
+            return `<li><span>${name}${cnt}</span><span>${pctStr}</span></li>`;
+        }).join('');
     };
     fillList('recYesList', reasons.Yes);
     fillList('recNoList', reasons.No);
     // Removed Factors Considered tiles and Maybe list per request
+
+    // Render totals, per-segment counts, Y/N/Maybe stacked bar and 3-bar segment overall for All or selected branch
+    try { renderSegmentTotalsGrid(); renderSegmentCountsGrid(); renderSegmentYNMChart(); renderSegmentOverallChart(); } catch (e) { }
 
     const brCtx = document.getElementById('branchOverallChart')?.getContext('2d');
     if (brCtx && data.rankings?.branches) {
@@ -384,7 +1065,7 @@ function renderExecutiveSummary(data) {
         };
         new Chart(brCtx, {
             type: 'bar',
-            data: { labels: arr.map(x => x[0]), datasets: [{ label: 'Overall', data: arr.map(x => x[1]), backgroundColor: arr.map(x => colorFor(x[1])) }] },
+            data: { labels: arr.map(x => toEnglishLabel(x[0])), datasets: [{ label: 'Overall', data: arr.map(x => x[1]), backgroundColor: arr.map(x => colorFor(x[1])) }] },
             options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } } }
         });
     }
@@ -393,106 +1074,511 @@ function renderExecutiveSummary(data) {
 function renderAcademicSection(data) {
     // Subject-wise stacked distribution
     const subj = data.subject_performance || {};
-    const subjects = Object.keys(subj);
-    const groups = ['Excellent','Good','Average','Poor'];
-    const colorMap = { Excellent: '#4caf50', Good: '#2196f3', Average: '#ff9800', Poor: '#e53935' };
-    const stackData = groups.map(g => ({ label: g, backgroundColor: colorMap[g], data: subjects.map(s => {
-        const dist = subj[s]?.rating_distribution || {};
-        const total = Object.values(dist).reduce((a,b)=>a+(b||0),0) || 1;
-        const sum = Object.entries(dist).reduce((acc, [k,v]) => {
-            const low = String(k).toLowerCase();
+    const subjectsAll = Object.keys(subj);
+    const subjects = subjectsAll.filter(name => {
+        const dist = subj[name]?.rating_distribution || {};
+        let exc=0, good=0, avg=0, poor=0;
+        for (const [k, v] of Object.entries(dist)) {
+            const raw = String(k);
+            const low = raw.toLowerCase();
+            const lowNorm = low.replace(/[\s./-]/g, '');
+            const val = v || 0;
             const isAvg = low.includes('average') || low.includes('satisfactory');
-            const isNeed = low.includes('need') || low.includes('improve');
-            if (g==='Excellent' && low.includes('excellent')) return acc + (v||0);
-            if (g==='Good' && low.includes('good')) return acc + (v||0);
-            if (g==='Average' && (isAvg)) return acc + (v||0);
-            if (g==='Poor' && (low.includes('poor') || isNeed)) return acc + (v||0);
-            return acc;
+            const isNeed = low.includes('need') || low.includes('needs') || low.includes('improve');
+            const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+            const isUnanswered = low.includes('unanswered') || low === '';
+            if (isNA || isUnanswered) continue;
+            if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += val;
+            else if (low.includes('good') || raw.trim()==='4') good += val;
+            else if (isAvg || raw.trim()==='3') avg += val;
+            else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += val;
+            else {
+                const num = parseInt(raw, 10);
+                if (num === 5) exc += val; else if (num === 4) good += val; else if (num === 3) avg += val; else if (num === 2 || num === 1) poor += val;
+            }
+        }
+        return (exc + good + avg + poor) > 0;
+    });
+    const displaySubjects = subjects.map(toEnglishLabel);
+    // Determine total respondents (overall or branch)
+    const totalResp = (data.summary?.total_responses)
+        ?? (data.summary_all?.total_responses)
+        ?? subjects.reduce((mx, s) => {
+            const dist = subj[s]?.rating_distribution || {};
+            const sum = Object.values(dist).reduce((a,b)=>a+(b||0),0);
+            return Math.max(mx, sum);
         }, 0);
-        return (sum/total*100);
+    const groups = ['Excellent','Good','Average','Poor','Not Applicable','Unanswered'];
+    const colorMap = {
+        Excellent: '#4caf50',
+        Good: '#2196f3',
+        Average: '#ff9800',
+        Poor: '#e53935',
+        'Not Applicable': '#90a4ae',
+        Unanswered: '#cfd8dc'
+    };
+    const stackData = groups.map(g => ({ label: g, backgroundColor: colorMap[g], barPercentage: 0.9, categoryPercentage: 0.9, data: subjects.map(s => {
+        const dist = subj[s]?.rating_distribution || {};
+        let exc=0, good=0, avg=0, poor=0, na=0, unanswered=0;
+        for (const [k, v] of Object.entries(dist)) {
+            const raw = String(k);
+            const low = raw.toLowerCase();
+            const lowNorm = low.replace(/[\s./-]/g, '');
+            const val = v || 0;
+            const isAvg = low.includes('average') || low.includes('satisfactory');
+            const isNeed = low.includes('need') || low.includes('needs') || low.includes('improve');
+            const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+            const isUnanswered = low.includes('unanswered') || low === '';
+            if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += val;
+            else if (low.includes('good') || raw.trim()==='4') good += val;
+            else if (isAvg || raw.trim()==='3') avg += val;
+            else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += val;
+            else if (isNA) na += val;
+            else if (isUnanswered) unanswered += val;
+            else {
+                const num = parseInt(raw, 10);
+                if (num === 5) exc += val;
+                else if (num === 4) good += val;
+                else if (num === 3) avg += val;
+                else if (num === 2 || num === 1) poor += val;
+            }
+        }
+        const val = (g==='Excellent')? exc
+            : (g==='Good')? good
+            : (g==='Average')? avg
+            : (g==='Poor')? poor
+            : (g==='Not Applicable')? na
+            : unanswered;
+        return val;
     }) }));
-    const sc = document.getElementById('subjectStackedChart')?.getContext('2d');
-    if (sc) {
-        new Chart(sc, { type: 'bar', data: { labels: subjects, datasets: stackData }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, max: 100 } } } });
+    // Dynamic height + horizontal bars to avoid label/legend overlap
+    const scEl = document.getElementById('subjectStackedChart');
+    const scCtx = (typeof resetCanvas === 'function' ? resetCanvas('subjectStackedChart') : null) || scEl?.getContext('2d');
+    if (scEl && scEl.parentElement) {
+        const h = Math.max(260, subjects.length * 26); // increase per-row height
+        scEl.parentElement.style.height = h + 'px';
+        scEl.style.height = h + 'px';
+        try { scEl.height = h; } catch(_) {}
+    }
+    if (scCtx) {
+        const truncate = (s, n=32) => (s && s.length>n) ? (s.slice(0,n-1)+'…') : s;
+        const labelsFull = displaySubjects.slice();
+        const labelsTrunc = labelsFull.map(s => truncate(s));
+        new Chart(scCtx, {
+            type: 'bar',
+            data: { labels: labelsTrunc, datasets: stackData },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'y',
+                layout: { padding: { left: 10, right: 14, bottom: 6 } },
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            title: (tt) => labelsFull[tt[0].dataIndex],
+                            label: (ctx) => {
+                                const val = ctx.parsed.x || 0;
+                                const idx = ctx.dataIndex;
+                                const rawName = subjects[idx];
+                                const dist = subj[rawName]?.rating_distribution || {};
+                                let exc=0, good=0, avg=0, poor=0, na=0, un=0;
+                                for (const [k, v] of Object.entries(dist)) {
+                                    const raw = String(k);
+                                    const low = raw.toLowerCase();
+                                    const lowNorm = low.replace(/[\s./-]/g, '');
+                                    const valv = v || 0;
+                                    const isAvg = low.includes('average') || low.includes('satisfactory');
+                                    const isNeed = low.includes('need') || low.includes('needs') || low.includes('improve');
+                                    const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+                                    const isUnanswered = low.includes('unanswered') || low === '';
+                                    if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += valv;
+                                    else if (low.includes('good') || raw.trim()==='4') good += valv;
+                                    else if (isAvg || raw.trim()==='3') avg += valv;
+                                    else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += valv;
+                                    else if (isNA) na += valv;
+                                    else if (isUnanswered) un += valv;
+                                    else {
+                                        const num = parseInt(raw, 10);
+                                        if (num === 5) exc += valv; else if (num === 4) good += valv; else if (num === 3) avg += valv; else if (num === 2 || num === 1) poor += valv;
+                                    }
+                                }
+                                const totalS = exc + good + avg + poor + na + un;
+                                const pct = totalS ? ((val*100/totalS).toFixed(1)+'%') : '';
+                                return `${ctx.dataset.label}: ${val.toLocaleString()}${pct? ' ('+pct+')':''}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { stacked: true, beginAtZero: true },
+                    y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } }
+                }
+            }
+        });
     }
     // Subject distribution counts table
     const table = document.getElementById('subjectCountsTable');
     if (table) {
-        const header = '<thead><tr><th>Subject</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Total</th></tr></thead>';
+        // Ensure table wraps and doesn't force overflow
+        table.style.tableLayout = 'fixed';
+        table.style.width = '100%';
+        table.style.wordBreak = 'break-word';
+        table.style.whiteSpace = 'normal';
+        const header = '<thead><tr><th>Subject</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Not Applicable</th><th>Unanswered</th><th>Total Respondents</th></tr></thead>';
         const rows = subjects.map(name => {
             const dist = subj[name]?.rating_distribution || {};
-            let exc = 0, good = 0, avg = 0, poor = 0;
+            let exc = 0, good = 0, avg = 0, poor = 0, na = 0, unanswered = 0;
             for (const [k, v] of Object.entries(dist)) {
-                const low = String(k).toLowerCase();
+                const raw = String(k);
+                const low = raw.toLowerCase();
+                const lowNorm = low.replace(/[\s./-]/g, '');
                 const val = v || 0;
                 const isAvg = low.includes('average') || low.includes('satisfactory');
-                const isNeed = low.includes('need') || low.includes('improve');
-                if (low.includes('excellent')) exc += val;
-                else if (low.includes('good')) good += val;
-                else if (isAvg) avg += val;
-                else if (low.includes('poor') || isNeed) poor += val;
+                const isNeed = low.includes('need') || low.includes('needs') || low.includes('improve');
+                const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+                const isUnanswered = low.includes('unanswered') || low === '';
+                if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += val;
+                else if (low.includes('good') || raw.trim()==='4') good += val;
+                else if (isAvg || raw.trim()==='3') avg += val;
+                else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += val;
+                else if (isNA) na += val;
+                else if (isUnanswered) unanswered += val;
+                else {
+                    const num = parseInt(raw, 10);
+                    if (num === 5) exc += val;
+                    else if (num === 4) good += val;
+                    else if (num === 3) avg += val;
+                    else if (num === 2 || num === 1) poor += val;
+                }
             }
-            const total = exc + good + avg + poor;
-            return `<tr><td>${name}</td><td>${exc.toLocaleString()}</td><td>${good.toLocaleString()}</td><td>${avg.toLocaleString()}</td><td>${poor.toLocaleString()}</td><td>${total.toLocaleString()}</td></tr>`;
-        }).join('');
+            const totalRatedNA = exc + good + avg + poor + na;
+            const total = totalRatedNA + unanswered;
+            const pct = (v) => total ? ` (${(v*100/total).toFixed(1)}%)` : '';
+            if (!totalRatedNA) return null;
+            return `<tr><td>${toEnglishLabel(name)}</td><td>${exc.toLocaleString()}${pct(exc)}</td><td>${good.toLocaleString()}${pct(good)}</td><td>${avg.toLocaleString()}${pct(avg)}</td><td>${poor.toLocaleString()}${pct(poor)}</td><td>${na.toLocaleString()}${pct(na)}</td><td>${unanswered.toLocaleString()}${pct(unanswered)}</td><td>${total.toLocaleString()}</td></tr>`;
+        }).filter(Boolean).join('');
         table.innerHTML = header + `<tbody>${rows}</tbody>`;
     }
 
-    // Teaching indicators
-    const ti = data.teaching_indicators || {};
-    const tic = document.getElementById('teachingIndicatorsChart')?.getContext('2d');
-    if (tic) {
-        const labels = Object.keys(ti);
-        const values = labels.map(l => ti[l] || 0);
-        new Chart(tic, { type: 'radar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: 'rgba(118, 75, 162, 0.2)', borderColor: 'rgba(118, 75, 162, 1)', borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, scales: { r: { beginAtZero: true, max: 5 } } } });
+    // Render segment-wise subject performance side-by-side (All branches or selected branch)
+    try { renderAcademicSegmentBlocks(); } catch (e) { }
+}
+
+// Academic: segment-wise side-by-side cards with stacked chart and counts
+function renderAcademicSegmentBlocks() {
+    const sec = document.getElementById('section-academic');
+    if (!sec) return;
+    const content = sec.querySelector('.section-content') || sec;
+    // Ensure container + header placed at the top of the section
+    let container = content.querySelector('.acad-seg-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'chart-container acad-seg-container';
+        const h = document.createElement('h2');
+        h.textContent = 'Subject-wise Performance by Segment';
+        container.appendChild(h);
+        content.insertBefore(container, content.firstChild);
+    } else {
+        // reset contents but keep container node at top
+        container.innerHTML = '';
+        const h = document.createElement('h2');
+        h.textContent = 'Subject-wise Performance by Segment';
+        container.appendChild(h);
+    }
+    let area = container.querySelector('.acad-seg-area');
+    if (!area) {
+        area = document.createElement('div');
+        area.className = 'acad-seg-area';
+        area.style.display = 'grid';
+        area.style.gridTemplateColumns = '1fr';
+        area.style.gap = '14px';
+        area.style.alignItems = 'start';
+        area.style.margin = '10px 0 18px';
+        container.appendChild(area);
+    } else {
+        area.innerHTML = '';
+        area.style.gridTemplateColumns = '1fr';
     }
 
-    // PTM effectiveness
-    const ptm = data.ptm_effectiveness ?? null;
-    const ptmc = document.getElementById('ptmChart')?.getContext('2d');
-    if (ptmc) {
-        new Chart(ptmc, { type: 'bar', data: { labels: ['PTM'], datasets: [{ label: 'Avg', data: [ptm || 0], backgroundColor: '#ff7043' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } } });
-    }
+    const order = ['Pre Primary','Primary','High School'];
+    // Select data source: per-branch-per-segment or global per-segment
+    const segMap = (CURRENT_BRANCH && RAW_DATA?.branch_segment_subject_performance?.[CURRENT_BRANCH])
+        ? RAW_DATA.branch_segment_subject_performance[CURRENT_BRANCH]
+        : (RAW_DATA?.segment_subject_performance || {});
+    const segs = order.filter(s => segMap[s] && Object.keys(segMap[s]).length);
+    if (!segs.length) return;
+
+    segs.forEach((seg, idx) => {
+        const subjMap = segMap[seg] || {};
+        const subjects = Object.keys(subjMap).filter(n => {
+            const dist = subjMap[n]?.rating_distribution || {};
+            let exc=0, good=0, avg=0, poor=0;
+            for (const [k, v] of Object.entries(dist)) {
+                const raw = String(k);
+                const low = raw.toLowerCase();
+                const lowNorm = low.replace(/[\s./-]/g,'');
+                const val = v || 0;
+                const isAvg = low.includes('average') || low.includes('satisfactory');
+                const isNeed = low.includes('need') || low.includes('improve');
+                const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+                const isUnanswered = low.includes('unanswered') || low === '';
+                if (isNA || isUnanswered) continue;
+                if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += val;
+                else if (low.includes('good') || raw.trim()==='4') good += val;
+                else if (isAvg || raw.trim()==='3') avg += val;
+                else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += val;
+                else {
+                    const num = parseInt(raw, 10);
+                    if (num === 5) exc += val; else if (num === 4) good += val; else if (num === 3) avg += val; else if (num === 2 || num === 1) poor += val;
+                }
+            }
+            return (exc + good + avg + poor) > 0;
+        });
+        if (!subjects.length) return;
+
+        const c = card(`${seg} — Subject Performance`);
+        // KPIs
+        const avgs = subjects.map(n => subjMap[n]?.average || null).filter(v => v!=null && !isNaN(v));
+        const overall = avgs.length ? (avgs.reduce((a,b)=>a+b,0)/avgs.length) : null;
+        // Responses per segment (branch-specific or aggregated across branches)
+        let responses = 0;
+        if (CURRENT_BRANCH) {
+            responses = (RAW_DATA?.branch_segment_performance?.[CURRENT_BRANCH]?.[seg]?.count) || 0;
+        } else {
+            const perfByBranch = RAW_DATA?.branch_segment_performance || {};
+            for (const br of Object.keys(perfByBranch)) {
+                const p = perfByBranch[br]?.[seg];
+                if (p && typeof p.count === 'number') responses += (p.count || 0);
+            }
+        }
+        const kpi = document.createElement('div'); kpi.className = 'kpi-grid';
+        kpi.innerHTML = `
+            <div class="kpi"><div class="label">Responses</div><div class="value">${(responses||0).toLocaleString()}</div></div>
+            <div class="kpi"><div class="label">Subjects</div><div class="value">${subjects.length}</div></div>
+            <div class="kpi"><div class="label">Overall Subject Avg</div><div class="value">${overall!=null&&!isNaN(overall)?overall.toFixed(2):'-'}</div></div>`;
+        c.appendChild(kpi);
+
+        // Row container (only distribution table; histogram removed)
+        const row = document.createElement('div'); row.className = 'chart-row';
+        row.style.display = 'block';
+
+        const tableWrap = document.createElement('div'); tableWrap.className = 'side-kpi';
+        tableWrap.style.alignSelf = 'start';
+        tableWrap.style.overflow = 'visible';
+        tableWrap.style.minWidth = '360px';
+        tableWrap.style.width = '100%';
+        const table = document.createElement('table'); table.className = 'ranking-table'; table.id = `acadSegTable_${idx}`;
+        table.style.tableLayout = 'fixed';
+        table.style.width = '100%';
+        table.style.wordBreak = 'break-word';
+        table.style.whiteSpace = 'normal';
+        tableWrap.appendChild(table);
+        row.appendChild(tableWrap);
+        c.appendChild(row);
+        area.appendChild(c);
+
+        // Histogram removed for segment cards; keep only table
+
+        // Table rows (percentages are over segment responses; include Unanswered so columns add up to 100%)
+        const header = '<thead><tr><th>Subject</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Not Applicable</th><th>Unanswered</th><th>Total Respondents</th></tr></thead>';
+        const rows = subjects.map(name => {
+            const dist = subjMap[name]?.rating_distribution || {};
+            let exc = 0, good = 0, avg = 0, poor = 0, na = 0, un = 0;
+            for (const [k, v] of Object.entries(dist)) {
+                const raw = String(k);
+                const low = raw.toLowerCase();
+                const lowNorm = low.replace(/[\s./-]/g, '');
+                const val = v || 0;
+                const isAvg = low.includes('average') || low.includes('satisfactory');
+                const isNeed = low.includes('need') || low.includes('improve');
+                const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+                const isUnanswered = low.includes('unanswered') || low === '';
+                if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += val;
+                else if (low.includes('good') || raw.trim()==='4') good += val;
+                else if (isAvg || raw.trim()==='3') avg += val;
+                else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += val;
+                else if (isNA) na += val;
+                else if (isUnanswered) un += val;
+                else {
+                    const num = parseInt(raw, 10);
+                    if (num === 5) exc += val; else if (num === 4) good += val; else if (num === 3) avg += val; else if (num === 2 || num === 1) poor += val;
+                }
+            }
+            const total = exc + good + avg + poor + na + un;
+            const pct = (v) => total ? ` (${(v*100/total).toFixed(1)}%)` : '';
+            return `<tr>
+                <td>${toEnglishLabel(name)}</td>
+                <td>${exc.toLocaleString()}${pct(exc)}</td>
+                <td>${good.toLocaleString()}${pct(good)}</td>
+                <td>${avg.toLocaleString()}${pct(avg)}</td>
+                <td>${poor.toLocaleString()}${pct(poor)}</td>
+                <td>${na.toLocaleString()}${pct(na)}</td>
+                <td>${un.toLocaleString()}${pct(un)}</td>
+                <td>${total.toLocaleString()}</td>
+            </tr>`;
+        }).join('');
+        table.innerHTML = header + `<tbody>${rows}</tbody>`;
+    });
 }
 
 function renderEnvironmentSection(data) {
-    const env = data.environment_focus || {};
-    const labels = Object.keys(env);
-    const values = labels.map(l => env[l] || 0);
-    const ec = document.getElementById('envRatingsChart')?.getContext('2d');
+    // Use Environment Quality detailed metrics (averages + distributions)
+    const envCat = (data.category_performance && data.category_performance['Environment Quality']) || {};
+    const rawLabels = Object.keys(envCat);
+    const displayLabels = rawLabels.map(toEnglishLabel);
+
+    // Total respondents (All branches or selected branch view)
+    const totalResp = (data.summary?.total_responses) ?? (data.summary_all?.total_responses) ?? 0;
+
+    // Build stacked counts (Excellent/Good/Average/Poor/Not Applicable/Unanswered)
+    const groups = ['Excellent','Good','Average','Poor','Not Applicable','Unanswered'];
+    const colorMap = {
+        Excellent: '#4caf50',
+        Good: '#2196f3',
+        Average: '#ff9800',
+        Poor: '#e53935',
+        'Not Applicable': '#90a4ae',
+        Unanswered: '#cfd8dc'
+    };
+    const parseBuckets = (distObj) => {
+        let exc=0, good=0, avg=0, poor=0, na=0, un=0;
+        for (const [k, v] of Object.entries(distObj||{})) {
+            const raw = String(k);
+            const low = raw.toLowerCase();
+            const lowNorm = low.replace(/[\s./-]/g, '');
+            const val = v || 0;
+            const isAvg = low.includes('average') || low.includes('satisfactory') || low.includes('சராசரி') || low.includes('திருப்தி');
+            const isNeed = low.includes('need') || low.includes('needs') || low.includes('improve') || low.includes('முன்னேற்றம்') || low.includes('மோசம்');
+            const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+            const isUnanswered = low.includes('unanswered') || low === '';
+            if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += val;
+            else if (low.includes('good') || raw.trim()==='4') good += val;
+            else if (isAvg || raw.trim()==='3') avg += val;
+            else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += val;
+            else if (isNA) na += val;
+            else if (isUnanswered) un += val;
+            else {
+                const num = parseInt(raw, 10);
+                if (num === 5) exc += val; else if (num === 4) good += val; else if (num === 3) avg += val; else if (num === 2 || num === 1) poor += val;
+            }
+        }
+        return { exc, good, avg, poor, na, un };
+    };
+
+    const datasets = groups.map(g => ({ label: g, backgroundColor: colorMap[g], barPercentage: 0.9, categoryPercentage: 0.9, data: rawLabels.map(raw => {
+        const dist = envCat[raw]?.rating_distribution || {};
+        const { exc, good, avg, poor, na, un } = parseBuckets(dist);
+        return (g==='Excellent')? exc
+            : (g==='Good')? good
+            : (g==='Average')? avg
+            : (g==='Poor')? poor
+            : (g==='Not Applicable')? na
+            : un;
+    }) }));
+
+    // Render stacked counts chart
+    const ecEl = document.getElementById('envRatingsChart');
+    const ec = (typeof resetCanvas === 'function' ? resetCanvas('envRatingsChart') : null) || ecEl?.getContext('2d');
+    if (ecEl && ecEl.parentElement) {
+        const h = Math.max(240, displayLabels.length * 26);
+        ecEl.parentElement.style.height = h + 'px';
+        ecEl.style.height = h + 'px';
+        try { ecEl.height = h; } catch(_) {}
+    }
     if (ec) {
-        new Chart(ec, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#66bb6a' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } } });
+        new Chart(ec, {
+            type: 'bar',
+            data: { labels: displayLabels, datasets },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'y',
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => {
+                                const val = ctx.parsed.x || 0;
+                                const raw = rawLabels[ctx.dataIndex];
+                                const dist = envCat[raw]?.rating_distribution || {};
+                                const { exc, good, avg, poor, na, un } = parseBuckets(dist);
+                                const total = exc + good + avg + poor + na + un;
+                                const pct = total ? ((val*100/total).toFixed(1)+'%') : '';
+                                return `${ctx.dataset.label}: ${val.toLocaleString()}${pct? ' ('+pct+')':''}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: { stacked: true, beginAtZero: true, max: totalResp || undefined },
+                    y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } }
+                }
+            }
+        });
     }
 
-    // KPIs: Safety and Hygiene
-    const safety = env['Campus safety'] ?? null;
-    let hygiene = null;
-    const infra = (data.category_performance && data.category_performance['Infrastructure']) || {};
-    for (const [k,v] of Object.entries(infra)) {
+    // KPIs: Safety and Hygiene from Environment Quality averages (fallback to Infrastructure for hygiene if needed)
+    let safety = null, hygiene = null;
+    for (const [k, v] of Object.entries(envCat)) {
         const low = String(k).toLowerCase();
-        if (low.includes('hygiene') || low.includes('clean')) { hygiene = v?.average ?? hygiene; }
+        if (safety == null && low.includes('safety')) safety = v?.average ?? safety;
+        if (hygiene == null && (low.includes('hygiene') || low.includes('clean'))) hygiene = v?.average ?? hygiene;
     }
-    const setKpi = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = (val==null || isNaN(val)) ? '-' : val.toFixed(2); };
+    if (hygiene == null) {
+        const infra = (data.category_performance && data.category_performance['Infrastructure']) || {};
+        for (const [k,v] of Object.entries(infra)) {
+            const low = String(k).toLowerCase();
+            if (low.includes('hygiene') || low.includes('clean')) { hygiene = v?.average ?? hygiene; }
+        }
+    }
+    if (safety == null) {
+        // Fallback to overall average of Environment Quality if explicit Safety not found
+        const vals = Object.values(envCat).map(o => o?.average).filter(x => x!=null && !isNaN(x));
+        if (vals.length) safety = vals.reduce((a,b)=>a+b,0)/vals.length;
+    }
+    const setKpi = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = (val==null || isNaN(val)) ? '-' : Number(val).toFixed(2); };
     setKpi('safetyKpi', safety);
     setKpi('hygieneKpi', hygiene);
+
+    // Environment counts table with percentages (over answered per item)
+    const table = document.getElementById('envCountsTable');
+    if (table) {
+        table.style.tableLayout = 'fixed';
+        table.style.width = '100%';
+        table.style.wordBreak = 'break-word';
+        table.style.whiteSpace = 'normal';
+        const header = '<thead><tr><th>Item</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Not Applicable</th><th>Total</th></tr></thead>';
+        const rows = displayLabels.map((disp, idx) => {
+            const raw = rawLabels[idx];
+            const dist = envCat[raw]?.rating_distribution || {};
+            const { exc, good, avg, poor, na } = parseBuckets(dist);
+            const total = exc + good + avg + poor + na;
+            const pct = (v) => total ? ` (${(v*100/total).toFixed(1)}%)` : '';
+            return `<tr><td>${disp}</td><td>${exc.toLocaleString()}${pct(exc)}</td><td>${good.toLocaleString()}${pct(good)}</td><td>${avg.toLocaleString()}${pct(avg)}</td><td>${poor.toLocaleString()}${pct(poor)}</td><td>${na.toLocaleString()}${pct(na)}</td><td>${total.toLocaleString()}</td></tr>`;
+        }).join('');
+        table.innerHTML = header + `<tbody>${rows}</tbody>`;
+    }
 }
 
 function renderCommunicationSection(data) {
     const cm = data.communication_metrics || {};
     const cc = document.getElementById('communicationChart')?.getContext('2d');
     if (cc) {
-        const labels = Object.keys(cm);
-        const values = labels.map(l => cm[l] || 0);
-        new Chart(cc, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#29b6f6' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } } });
+        const raw = Object.keys(cm);
+        const labels = raw.map(l => toEnglishLabel(l));
+        const values = raw.map(l => cm[l] || 0);
+        new Chart(cc, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#29b6f6' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.y ?? ctx.parsed.x; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
     try { renderAdminChart(data); } catch(e) { }
 
     const roles = data.concern_roles || {};
     const rc = document.getElementById('concernRoleChart')?.getContext('2d');
     if (rc) {
-        const labels = Object.keys(roles);
-        const values = labels.map(l => roles[l] || 0);
-        new Chart(rc, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#ab47bc' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } } });
+        const raw = Object.keys(roles);
+        const labels = raw.map(l => toEnglishLabel(l));
+        const values = raw.map(l => roles[l] || 0);
+        new Chart(rc, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#ab47bc' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.y ?? ctx.parsed.x; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
 
     const cr = data.concern_resolution || {};
@@ -504,21 +1590,29 @@ function renderCommunicationSection(data) {
     }
     // Populate concern resolution counts KPIs
     try {
-        const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = (val ?? 0).toLocaleString(); };
         const cr = data.concern_resolution || {};
-        setTxt('concernYesCount', cr['Yes'] || 0);
-        setTxt('concernNoCount', cr['No'] || 0);
-        setTxt('concernNaCount', cr['Not Applicable'] || 0);
+        const yes = cr['Yes'] || 0, no = cr['No'] || 0, na = cr['Not Applicable'] || 0;
+        const tot = yes + no + na;
+        const fmt = (n) => tot ? `${(n||0).toLocaleString()} (${((n/tot)*100).toFixed(1)}%)` : (n||0).toLocaleString();
+        const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = fmt(val); };
+        setTxt('concernYesCount', yes);
+        setTxt('concernNoCount', no);
+        setTxt('concernNaCount', na);
     } catch (e) { }
 }
 
 function renderInfrastructureSection(data) {
     const infra = (data.category_performance && data.category_performance['Infrastructure']) || {};
-    const labels = Object.keys(infra);
-    const values = labels.map(l => infra[l]?.average || 0);
+    const raw = Object.keys(infra);
+    const labels = raw.map(toEnglishLabel);
+    const values = raw.map(l => infra[l]?.average || 0);
     const ic = document.getElementById('infraCategoryChart')?.getContext('2d');
     if (ic) {
-        new Chart(ic, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#ffa726' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } } });
+        const nArr = raw.map(l => {
+            const dist = infra[l]?.rating_distribution || {};
+            return Object.values(dist).reduce((a,b)=>a+(b||0),0);
+        });
+        new Chart(ic, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#ffa726' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.y ?? ctx.parsed.x; const n = nArr[ctx.dataIndex] || null; const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
 
     // Simple heatmap: Branch x {Academics, Infrastructure, Environment, Administration}
@@ -539,7 +1633,7 @@ function renderInfrastructureSection(data) {
             return `<td style="background: rgb(${red},${green},80); color:#fff; text-align:center; padding:8px;">${v? v.toFixed(2):'-'}</td>`;
         };
         container.innerHTML = `<div style="overflow:auto"><table class="ranking-table"><thead><tr><th>Branch</th><th>Academics</th><th>Infrastructure</th><th>Environment</th><th>Administration</th></tr></thead><tbody>`+
-            rows.map(r => `<tr><td style="background:#001f3f;color:#fff;padding:8px;">${r.Branch}</td>${makeCell(r.Academics)}${makeCell(r.Infrastructure)}${makeCell(r.Environment)}${makeCell(r.Administration)}</tr>`).join('')+
+            rows.map(r => `<tr><td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>${makeCell(r.Academics)}${makeCell(r.Infrastructure)}${makeCell(r.Environment)}${makeCell(r.Administration)}</tr>`).join('')+
             `</tbody></table></div>`;
     }
 }
@@ -564,17 +1658,26 @@ function renderStrengthsSection(data) {
 
     const strengthCtx = document.getElementById('topStrengthsChart')?.getContext('2d');
     if (strengthCtx) {
-        new Chart(strengthCtx, { type: 'bar', data: { labels: top.map(x=>x[0]), datasets: [{ label: 'Avg', data: top.map(x=>x[1]), backgroundColor: '#26a69a' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } } } });
+        new Chart(strengthCtx, { type: 'bar', data: { labels: top.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Avg', data: top.map(x=>x[1]), backgroundColor: '#26a69a' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
 
     const impCtx = document.getElementById('topImprovementsChart')?.getContext('2d');
     if (impCtx) {
-        new Chart(impCtx, { type: 'bar', data: { labels: low.map(x=>x[0]), datasets: [{ label: 'Avg', data: low.map(x=>x[1]), backgroundColor: '#ef5350' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } } } });
+        new Chart(impCtx, { type: 'bar', data: { labels: low.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Avg', data: low.map(x=>x[1]), backgroundColor: '#ef5350' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
 }
 
 function renderBranchComparisonSection(data) {
-    const ranked = data.rankings?.branches || [];
+    const branchSection = document.getElementById('section-branch');
+    if (branchSection) branchSection.style.display = CURRENT_BRANCH ? 'none' : '';
+    if (CURRENT_BRANCH) return; // no-op when a specific branch is selected
+    // Hide 'Top 5 Branches by Reviews (All)' when a branch is selected
+    try {
+        const topTbl = document.getElementById('branchTopReviewsTable');
+        const wrap = topTbl ? topTbl.closest('.chart-container') : null;
+        if (wrap) wrap.style.display = CURRENT_BRANCH ? 'none' : '';
+    } catch(_) {}
+    const ranked = (data.rankings?.branches || []);
     const rankCtx = document.getElementById('branchRankedChart')?.getContext('2d');
     if (rankCtx) {
         const arr = ranked.slice();
@@ -596,10 +1699,10 @@ function renderBranchComparisonSection(data) {
                 return `rgb(${r},${g},${b})`;
             }
         };
-        new Chart(rankCtx, { type: 'bar', data: { labels: arr.map(x=>x[0]), datasets: [{ label: 'Overall', data: arr.map(x=>x[1]), backgroundColor: arr.map(x=>colorFor(x[1])) }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } } } });
+        new Chart(rankCtx, { type: 'bar', data: { labels: arr.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Overall', data: arr.map(x=>x[1]), backgroundColor: arr.map(x=>colorFor(x[1])) }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; let n = null; try { const bp = data.branch_performance || {}; for (const [b,v] of Object.entries(bp)) { if (toEnglishLabel(b) === lab) { n = v?.count || null; break; } } } catch(_) {} return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
 
-    let brPct = data.branch_recommendation_pct || {};
+    let brPct = (data.branch_recommendation_pct || {});
     // Fallback: if no pct available, derive from counts when possible
     try {
         const hasAny = Object.values(brPct || {}).some(v => v != null && !isNaN(v));
@@ -617,7 +1720,7 @@ function renderBranchComparisonSection(data) {
     if (recCtx) {
         const entries = Object.entries(brPct).filter(([,v])=> v!=null);
         entries.sort((a,b)=>b[1]-a[1]);
-        const labels = entries.slice(0,20).map(x=>x[0].slice(0,18));
+        const labels = entries.slice(0,20).map(x=>toEnglishLabel(x[0]).slice(0,18));
         const values = entries.slice(0,20).map(x=>x[1]);
         new Chart(recCtx, { type: 'bar', data: { labels, datasets: [{ label: '% Recommend', data: values, backgroundColor: '#8d6e63' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } } } });
     }
@@ -625,7 +1728,7 @@ function renderBranchComparisonSection(data) {
     const scatterCtx = document.getElementById('branchScatterChart')?.getContext('2d');
     if (scatterCtx) {
         const branches = data.branch_performance || {};
-        const points = Object.entries(branches).map(([name,val])=> ({ x: val.subject_avg || 0, y: val.infrastructure_avg || 0, r: Math.max(4, Math.min(10, (val.count||10)/50)), label: name }));
+        const points = Object.entries(branches).map(([name,val])=> ({ x: val.subject_avg || 0, y: val.infrastructure_avg || 0, r: Math.max(4, Math.min(10, (val.count||10)/50)), label: toEnglishLabel(name) }));
         new Chart(scatterCtx, { type: 'scatter', data: { datasets: [{ label: 'Branches', data: points, parsing: false, pointBackgroundColor: '#42a5f5' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { title: { display: true, text: 'Academics' }, min: 0, max: 5 }, y: { title: { display: true, text: 'Infrastructure' }, min: 0, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx)=> `${ctx.raw.label}: (${ctx.raw.x.toFixed(2)}, ${ctx.raw.y.toFixed(2)})` } } } } });
     }
 
@@ -641,7 +1744,7 @@ function renderBranchComparisonSection(data) {
         if (sel.options.length <= 1) {
             keys.forEach(k => {
                 const opt = document.createElement('option');
-                opt.value = k; opt.textContent = k; sel.appendChild(opt);
+                opt.value = k; opt.textContent = toEnglishLabel(k); sel.appendChild(opt);
             });
         }
     };
@@ -684,7 +1787,7 @@ function renderBranchComparisonSection(data) {
         const render = (id, rws) => {
             const el = document.getElementById(id); if (!el) return;
             el.innerHTML = '<thead><tr><th>Branch</th><th>Yes</th><th>No</th><th>Maybe</th><th>NA</th><th>Total</th></tr></thead>' +
-                '<tbody>' + rws.map(r=> `<tr><td>${r.branch}</td>`+
+                '<tbody>' + rws.map(r=> `<tr><td>${toEnglishLabel(r.branch)}</td>`+
                 `<td>${r.yes.toLocaleString()} (${pctStr(r.yes, r.totalRec)})</td>`+
                 `<td>${r.no.toLocaleString()} (${pctStr(r.no, r.totalRec)})</td>`+
                 `<td>${r.maybe.toLocaleString()} (${pctStr(r.maybe, r.totalRec)})</td>`+
@@ -707,12 +1810,12 @@ function renderBranchComparisonSection(data) {
             const tot = ex + gd + av + pr;
             return { branch: b, Excellent: ex, Poor: pr, Total: tot };
         });
-        const topPoor = rows.slice().sort((a,b)=> b.Poor - a.Poor).slice(0, 15);
+        const topPoor = rows.slice().sort((a,b)=> b.Poor - a.Poor).slice(0, 5);
         const topExcellent = rows.slice().sort((a,b)=> b.Excellent - a.Excellent).slice(0, 15);
         const render = (id, rws, key, label) => {
             const el = document.getElementById(id); if (!el) return;
-            el.innerHTML = `<thead><tr><th>Branch</th><th>${label} Count</th><th>${label} %</th></tr></thead>` +
-                '<tbody>' + rws.map(r=> `<tr><td>${r.branch}</td><td>${r[key].toLocaleString()}</td><td>${pctStr(r[key], r.Total)}</td></tr>`).join('') + '</tbody>';
+            el.innerHTML = `<thead><tr><th>Branch</th><th>${label} Count</th><th>${label} %</th><th>Total Rated</th></tr></thead>` +
+                '<tbody>' + rws.map(r=> `<tr><td>${toEnglishLabel(r.branch)}</td><td>${r[key].toLocaleString()}</td><td>${pctStr(r[key], r.Total)}</td><td>${r.Total.toLocaleString()}</td></tr>`).join('') + '</tbody>';
         };
         render('branchPoorTable', topPoor, 'Poor', 'Poor');
         render('branchExcellentTable', topExcellent, 'Excellent', 'Excellent');
@@ -723,8 +1826,22 @@ function renderBranchComparisonSection(data) {
     if (ratingGroupSel) ratingGroupSel.addEventListener('change', updateRatingTables);
     if (classSel) classSel.addEventListener('change', () => { updateRecTables(); updateRatingTables(); });
     if (orientSel) orientSel.addEventListener('change', () => { updateRecTables(); updateRatingTables(); });
+    // no branchCompareScope control; section visibility auto-handled by CURRENT_BRANCH
+
+    // Top 5 branches by total reviews (all)
+    const updateTopReviewsTable = () => {
+        const el = document.getElementById('branchTopReviewsTable');
+        if (!el) return;
+        const bp = data.branch_performance || {};
+        const rows = Object.entries(bp).map(([b, v]) => ({ branch: b, count: v?.count || 0 }));
+        rows.sort((a,b)=> b.count - a.count);
+        const top = rows.slice(0,5);
+        el.innerHTML = '<thead><tr><th>Branch</th><th>Total Reviews</th></tr></thead>' +
+            '<tbody>' + top.map(r => `<tr><td>${toEnglishLabel(r.branch)}</td><td>${r.count.toLocaleString()}</td></tr>`).join('') + '</tbody>';
+    };
 
     // Initial render
     updateRecTables();
     updateRatingTables();
+    updateTopReviewsTable();
 }
