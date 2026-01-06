@@ -1883,7 +1883,8 @@ function renderInfrastructureSection(data) {
     const container = document.getElementById('infraHeatmap');
     if (container) {
         console.log('🏗️ Rendering heatmap, branch_performance:', Object.keys(data.branch_performance || {}));
-        const branches = data.branch_performance || {};
+        const branchesAll = RAW_DATA?.branch_performance || {};
+        const branchesForRanks = (branchesAll && Object.keys(branchesAll).length) ? branchesAll : (data.branch_performance || {});
         const brRatingCounts = (data.branch_rating_counts || RAW_DATA?.branch_rating_counts || {});
         const cols = ['Academics','Infrastructure','Environment','Administration'];
         const groupKey = {
@@ -1968,7 +1969,7 @@ function renderInfrastructureSection(data) {
             for (let i=0; i<sorted.length; i++) out[sorted[i].b] = i + 1;
             return out;
         };
-        const rows = Object.entries(branches).map(([b, v]) => {
+        const rowsAll = Object.entries(branchesForRanks).map(([b, v]) => {
             const needs = overallNeedsForBranch(b);
             return {
                 Branch: b,
@@ -1981,14 +1982,19 @@ function renderInfrastructureSection(data) {
                 Needs: needs
             };
         });
-        const overallRank = makeRankMap(rows, 'Overall');
+        const rowByBranch = Object.fromEntries(rowsAll.map(r => [r.Branch, r]));
+        const overallRank = makeRankMap(rowsAll, 'Overall');
         const rankByCol = {
-            Academics: makeRankMap(rows, 'Academics'),
-            Infrastructure: makeRankMap(rows, 'Infrastructure'),
-            Environment: makeRankMap(rows, 'Environment'),
-            Administration: makeRankMap(rows, 'Administration')
+            Academics: makeRankMap(rowsAll, 'Academics'),
+            Infrastructure: makeRankMap(rowsAll, 'Infrastructure'),
+            Environment: makeRankMap(rowsAll, 'Environment'),
+            Administration: makeRankMap(rowsAll, 'Administration')
         };
-        rows.sort((a,b)=> (overallRank[a.Branch] || 999999) - (overallRank[b.Branch] || 999999));
+        if (!CURRENT_BRANCH) {
+            rowsAll.sort((a,b)=> (overallRank[a.Branch] || 999999) - (overallRank[b.Branch] || 999999));
+        }
+
+        const rows = CURRENT_BRANCH ? rowsAll.filter(r => r.Branch === CURRENT_BRANCH) : rowsAll;
 
         const makeMetricCell = (branch, col, val) => {
             const vOk = !(val == null || isNaN(val));
@@ -2009,7 +2015,7 @@ function renderInfrastructureSection(data) {
                 `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? v.toFixed(2) : '-'}</div>${sub}${sub2}</td>`;
         };
         const makeNeedsCell = (branch) => {
-            const n = rows.find(r => r.Branch === branch)?.Needs || { overall: null, focus: null, focusPct: null };
+            const n = rowByBranch?.[branch]?.Needs || { overall: null, focus: null, focusPct: null };
             const vOk = n.overall != null && !isNaN(n.overall);
             const bg = bgForNeeds(n.overall);
             const focus = (n.focus && n.focusPct != null && !isNaN(n.focusPct)) ? `${toEnglishLabel(n.focus)} ${n.focusPct.toFixed(1)}%` : '-';
