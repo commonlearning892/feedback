@@ -120,6 +120,7 @@ function deriveViewData(data, branch) {
                 'Administration': bp.admin_avg ?? null,
             }
         },
+        overall_rating_counts: (data.overall_rating_counts_by_branch?.[branch]) || data.overall_rating_counts || {},
         recommendation: { distribution: recCounts, yes_pct: yesPct },
         recommendation_reasons: recReasons || data.recommendation_reasons || {},
         subject_performance: data.branch_subject_performance?.[branch] || {},
@@ -127,9 +128,11 @@ function deriveViewData(data, branch) {
         teaching_indicators: data.teaching_indicators_by_branch?.[branch] || data.teaching_indicators || {},
         ptm_effectiveness: data.ptm_effectiveness_by_branch?.[branch] ?? data.ptm_effectiveness ?? null,
         communication_metrics: data.communication_metrics_by_branch?.[branch] || data.communication_metrics || {},
+        communication_metrics_detail: data.communication_metrics_detail_by_branch?.[branch] || data.communication_metrics_detail || {},
         environment_focus: data.environment_focus_by_branch?.[branch] || data.environment_focus || {},
         concern_roles: data.concern_roles_by_branch?.[branch] || data.concern_roles || {},
         concern_resolution: data.branch_concern_resolution?.[branch] || data.concern_resolution || {},
+        program_excellence: data.program_excellence_by_branch?.[branch] || data.program_excellence || {},
         // Keep rankings global. Scope branch_* maps to the selected branch only.
         rankings: data.rankings,
         branch_performance: (data.branch_performance && data.branch_performance[branch]) ? { [branch]: data.branch_performance[branch] } : {},
@@ -207,6 +210,100 @@ function sanitizeDisplayedText(root=document) {
             }
         });
     } catch (_) {}
+}
+
+const RATING_BUCKETS = ['Excellent','Good','Average','Poor','Not Applicable','Unanswered'];
+const RATING_BUCKET_COLORS = {
+    Excellent: '#4caf50',
+    Good: '#2196f3',
+    Average: '#ff9800',
+    Poor: '#e53935',
+    'Not Applicable': '#90a4ae',
+    Unanswered: '#cfd8dc'
+};
+
+function parseRatingBuckets(distObj) {
+    let exc=0, good=0, avg=0, poor=0, na=0, un=0;
+    for (const [k, v] of Object.entries(distObj||{})) {
+        const raw = String(k);
+        const low = raw.toLowerCase();
+        const lowNorm = low.replace(/[\s./-]/g, '');
+        const val = Number(v) || 0;
+        const isAvg = low.includes('average') || low.includes('satisfactory') || low.includes('சராசரி') || low.includes('திருப்தி');
+        const isNeed = low.includes('need') || low.includes('needs') || low.includes('improve') || low.includes('முன்னேற்றம்') || low.includes('மோசம்');
+        const isNA = low.includes('not applicable') || low.includes('பொருந்தாது') || low === 'na' || low === 'n/a' || low === 'n.a' || lowNorm === 'notapplicable';
+        const isUnanswered = low.includes('unanswered') || low === '';
+        if (low.includes('excellent') || raw.trim()==='5' || low.includes('very good')) exc += val;
+        else if (low.includes('good') || raw.trim()==='4') good += val;
+        else if (isAvg || raw.trim()==='3') avg += val;
+        else if (low.includes('poor') || isNeed || raw.trim()==='2' || raw.trim()==='1') poor += val;
+        else if (isNA) na += val;
+        else if (isUnanswered) un += val;
+        else {
+            const num = parseInt(raw, 10);
+            if (num === 5) exc += val;
+            else if (num === 4) good += val;
+            else if (num === 3) avg += val;
+            else if (num === 2 || num === 1) poor += val;
+        }
+    }
+    return { exc, good, avg, poor, na, un };
+}
+
+function bucketCountGet(counts, bucket) {
+    if (!counts) return 0;
+    if (bucket === 'Excellent') return Number(counts.Excellent) || 0;
+    if (bucket === 'Good') return Number(counts.Good) || 0;
+    if (bucket === 'Average') return Number(counts.Average) || 0;
+    if (bucket === 'Poor') return Number(counts.Poor) || 0;
+    if (bucket === 'Not Applicable') return Number(counts['Not Applicable']) || 0;
+    if (bucket === 'Unanswered') return Number(counts.Unanswered) || 0;
+    return 0;
+}
+
+function renderBucketStackedChart(canvasId, labelList, countsByLabel, opts={}) {
+    const ctx = (typeof resetCanvas === 'function' ? resetCanvas(canvasId) : null) || document.getElementById(canvasId)?.getContext('2d');
+    if (!ctx) return;
+    const labelsFull = labelList.slice();
+    const truncate = (s, n=38) => (s && s.length>n) ? (s.slice(0,n-1)+'…') : s;
+    const labels = labelsFull.map(s => truncate(toEnglishLabel(s)));
+    const datasets = RATING_BUCKETS.map(bucket => ({
+        label: bucket,
+        backgroundColor: RATING_BUCKET_COLORS[bucket],
+        barPercentage: 0.9,
+        categoryPercentage: 0.9,
+        data: labelsFull.map(l => bucketCountGet(countsByLabel?.[l], bucket))
+    }));
+    const indexAxis = opts.indexAxis || 'y';
+    new Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            indexAxis,
+            plugins: {
+                legend: { position: 'bottom' },
+                tooltip: {
+                    callbacks: {
+                        title: (tt) => toEnglishLabel(labelsFull[tt[0].dataIndex]),
+                        label: (ctx) => {
+                            const lab = labelsFull[ctx.dataIndex];
+                            const counts = countsByLabel?.[lab] || {};
+                            const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(counts, b), 0);
+                            const val = (indexAxis === 'y') ? (ctx.parsed.x || 0) : (ctx.parsed.y || 0);
+                            const pct = total ? `${(val*100/total).toFixed(1)}%` : '';
+                            return `${ctx.dataset.label}: ${Number(val).toLocaleString()}${pct ? ` (${pct})` : ''}`;
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { stacked: true, beginAtZero: true },
+                y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } }
+            }
+        }
+    });
 }
 
 // Helper: approximate respondent count (n) for a given item label by scanning category_performance
@@ -913,29 +1010,50 @@ function renderAdminChart(data) {
     if (!ctx) return;
     const adm = (data.category_performance && data.category_performance['Administrative Support']) || {};
     const metrics = Object.entries(adm).slice(0, 6);
-    const nArr = metrics.map(([k, v]) => {
-        const dist = v?.rating_distribution || {};
-        return Object.values(dist).reduce((a,b)=>a+(b||0),0);
-    });
+    const labelsFull = metrics.map(m => m[0]);
+    const countsByLabel = Object.fromEntries(labelsFull.map(l => {
+        const dist = adm[l]?.rating_distribution || {};
+        const b = parseRatingBuckets(dist);
+        return [l, { Excellent: b.exc, Good: b.good, Average: b.avg, Poor: b.poor, 'Not Applicable': b.na, Unanswered: b.un }];
+    }));
+    const el = document.getElementById('adminChart');
+    if (el && el.parentElement) {
+        const h = Math.max(260, labelsFull.length * 44);
+        el.parentElement.style.height = h + 'px';
+        try { el.height = h; } catch(_) {}
+    }
+    const labels = labelsFull.map(toEnglishLabel);
+    const datasets = RATING_BUCKETS.map(bucket => ({
+        label: bucket,
+        backgroundColor: RATING_BUCKET_COLORS[bucket],
+        barPercentage: 0.9,
+        categoryPercentage: 0.9,
+        data: labelsFull.map(l => bucketCountGet(countsByLabel?.[l], bucket))
+    }));
     new Chart(ctx, {
         type: 'bar',
-        data: {
-            labels: metrics.map(m => toEnglishLabel(m[0]).substring(0, 25)),
-            datasets: [{
-                label: 'Score',
-                data: metrics.map(m => m[1].average),
-                backgroundColor: 'rgba(233, 30, 99, 0.8)'
-            }]
-        },
+        data: { labels, datasets },
         options: {
             indexAxis: 'y',
             responsive: true,
             maintainAspectRatio: false,
-            scales: { x: { beginAtZero: true, max: 5 } },
-            plugins: { tooltip: { callbacks: { label: (ctx) => {
-                const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = nArr[ctx.dataIndex] || null; const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`;
-                return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`;
-            } } } }
+            plugins: {
+                legend: { position: 'bottom' },
+                tooltip: {
+                    callbacks: {
+                        title: (tt) => toEnglishLabel(labelsFull[tt[0].dataIndex]),
+                        label: (ctx) => {
+                            const lab = labelsFull[ctx.dataIndex];
+                            const counts = countsByLabel?.[lab] || {};
+                            const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(counts, b), 0);
+                            const val = ctx.parsed.x || 0;
+                            const pct = total ? `${(val*100/total).toFixed(1)}%` : '';
+                            return `${ctx.dataset.label}: ${Number(val).toLocaleString()}${pct ? ` (${pct})` : ''}`;
+                        }
+                    }
+                }
+            },
+            scales: { x: { stacked: true, beginAtZero: true }, y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } } }
         }
     });
 }
@@ -1008,41 +1126,19 @@ function renderExecutiveSummary(data) {
         `;
     }
 
-    const cat = data.summary.category_scores || {};
-    const catCtx = (typeof resetCanvas === 'function' ? resetCanvas('summaryCategoryChart') : null) || document.getElementById('summaryCategoryChart')?.getContext('2d');
-    if (catCtx) {
-        const raw = Object.keys(cat);
-        const labels = raw.map(l => toEnglishLabel(l));
-        const values = raw.map(l => cat[l]);
-        // Estimate n per category from category_performance
-        const nByCat = {};
-        try {
-            const perf = data.category_performance || {};
-            for (const k of raw) {
-                let n = 0; const items = perf[k] || {};
-                for (const obj of Object.values(items)) {
-                    const dist = obj?.rating_distribution || {};
-                    for (const v of Object.values(dist)) n += (v || 0);
-                }
-                nByCat[toEnglishLabel(k)] = n || null;
-            }
-        } catch (_) {}
-        new Chart(catCtx, {
-            type: 'bar',
-            data: { labels, datasets: [{ label: 'Avg Score', data: values, backgroundColor: 'rgba(33, 150, 243, 0.8)'}] },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: { y: { beginAtZero: true, max: 5 } },
-                plugins: {
-                    tooltip: { callbacks: { label: (ctx) => {
-                        const lab = ctx.label; const val = ctx.parsed.y ?? ctx.parsed.x; const n = nByCat[lab];
-                        return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''}`;
-                    } } }
-                }
-            }
-        });
-    }
+    try {
+        const counts = data.overall_rating_counts || {};
+        const order = ['Overall Satisfaction','Academics','Environment','Infrastructure','Administration'];
+        const labels = order.filter(k => counts[k]);
+        const countsByLabel = Object.fromEntries(labels.map(l => [l, counts[l]]));
+        const el = document.getElementById('summaryCategoryChart');
+        if (el && el.parentElement) {
+            const h = Math.max(220, labels.length * 52);
+            el.parentElement.style.height = h + 'px';
+            try { el.height = h; } catch(_) {}
+        }
+        if (labels.length) renderBucketStackedChart('summaryCategoryChart', labels, countsByLabel, { indexAxis: 'y' });
+    } catch (e) { console.error(e); }
 
     const rec = data.recommendation?.distribution || {};
     const recCtx = (typeof resetCanvas === 'function' ? resetCanvas('recommendationChart') : null) || document.getElementById('recommendationChart')?.getContext('2d');
@@ -1333,6 +1429,50 @@ function renderAcademicSection(data) {
 
     // Render segment-wise subject performance side-by-side (All branches or selected branch)
     try { renderAcademicSegmentBlocks(); } catch (e) { }
+    try { renderProgramExcellence(data); } catch (e) { }
+}
+
+function renderProgramExcellence(data) {
+    const pe = data.program_excellence || {};
+    const keys = Object.keys(pe);
+    const canvas = document.getElementById('programExcellenceChart');
+    const table = document.getElementById('programExcellenceTable');
+    const wrap = canvas ? canvas.closest('.chart-container') : null;
+    if (wrap) wrap.style.display = keys.length ? '' : 'none';
+    if (!keys.length) {
+        if (table) table.innerHTML = '';
+        return;
+    }
+
+    if (canvas && canvas.parentElement) {
+        const h = Math.max(260, keys.length * 52);
+        canvas.parentElement.style.height = h + 'px';
+        try { canvas.height = h; } catch(_) {}
+    }
+
+    const countsByLabel = Object.fromEntries(keys.map(k => [k, pe[k]?.rating_counts || {}]));
+    renderBucketStackedChart('programExcellenceChart', keys, countsByLabel, { indexAxis: 'y' });
+
+    if (table) {
+        table.style.tableLayout = 'fixed';
+        table.style.width = '100%';
+        table.style.wordBreak = 'break-word';
+        table.style.whiteSpace = 'normal';
+        const header = '<thead><tr><th>Question</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Not Applicable</th><th>Unanswered</th><th>Total</th></tr></thead>';
+        const rows = keys.map(k => {
+            const c = pe[k]?.rating_counts || {};
+            const exc = bucketCountGet(c,'Excellent');
+            const good = bucketCountGet(c,'Good');
+            const avg = bucketCountGet(c,'Average');
+            const poor = bucketCountGet(c,'Poor');
+            const na = bucketCountGet(c,'Not Applicable');
+            const un = bucketCountGet(c,'Unanswered');
+            const total = exc + good + avg + poor + na + un;
+            const pct = (v) => total ? ` (${(v*100/total).toFixed(1)}%)` : '';
+            return `<tr><td>${toEnglishLabel(k)}</td><td>${exc.toLocaleString()}${pct(exc)}</td><td>${good.toLocaleString()}${pct(good)}</td><td>${avg.toLocaleString()}${pct(avg)}</td><td>${poor.toLocaleString()}${pct(poor)}</td><td>${na.toLocaleString()}${pct(na)}</td><td>${un.toLocaleString()}${pct(un)}</td><td>${total.toLocaleString()}</td></tr>`;
+        }).join('');
+        table.innerHTML = header + `<tbody>${rows}</tbody>`;
+    }
 }
 
 // Academic: segment-wise side-by-side cards with stacked chart and counts
@@ -1642,15 +1782,17 @@ function renderEnvironmentSection(data) {
 
 function renderCommunicationSection(data) {
     console.log('💬 renderCommunicationSection called, CURRENT_BRANCH:', CURRENT_BRANCH);
-    const cm = data.communication_metrics || {};
-    console.log('💬 Communication metrics:', Object.keys(cm));
-    const cc = (typeof resetCanvas === 'function' ? resetCanvas('communicationChart') : null) || document.getElementById('communicationChart')?.getContext('2d');
-    if (cc) {
-        const raw = Object.keys(cm);
-        const labels = raw.map(l => toEnglishLabel(l));
-        const values = raw.map(l => cm[l] || 0);
-        new Chart(cc, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#29b6f6' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.y ?? ctx.parsed.x; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
+    const cmDetail = data.communication_metrics_detail || {};
+    const keys = Object.keys(cmDetail);
+    console.log('💬 Communication metrics:', keys);
+    const el = document.getElementById('communicationChart');
+    if (el && el.parentElement) {
+        const h = Math.max(240, keys.length * 52);
+        el.parentElement.style.height = h + 'px';
+        try { el.height = h; } catch(_) {}
     }
+    const countsByLabel = Object.fromEntries(keys.map(k => [k, cmDetail[k]?.rating_counts || {}]));
+    if (keys.length) renderBucketStackedChart('communicationChart', keys, countsByLabel, { indexAxis: 'y' });
     try { renderAdminChart(data); } catch(e) { }
 
     const roles = data.concern_roles || {};
@@ -1688,15 +1830,53 @@ function renderInfrastructureSection(data) {
     let infra = (data.category_performance && data.category_performance['Infrastructure']) || {};
     console.log('🏗️ Infrastructure categories:', Object.keys(infra));
     const raw = Object.keys(infra);
-    const labels = raw.map(toEnglishLabel);
-    const values = raw.map(l => infra[l]?.average || 0);
     const ic = (typeof resetCanvas === 'function' ? resetCanvas('infraCategoryChart') : null) || document.getElementById('infraCategoryChart')?.getContext('2d');
     if (ic) {
-        const nArr = raw.map(l => {
+        const el = document.getElementById('infraCategoryChart');
+        if (el && el.parentElement) {
+            const h = Math.max(260, raw.length * 44);
+            el.parentElement.style.height = h + 'px';
+            try { el.height = h; } catch(_) {}
+        }
+        const labels = raw.map(toEnglishLabel);
+        const countsByLabel = Object.fromEntries(raw.map(l => {
             const dist = infra[l]?.rating_distribution || {};
-            return Object.values(dist).reduce((a,b)=>a+(b||0),0);
+            const b = parseRatingBuckets(dist);
+            return [l, { Excellent: b.exc, Good: b.good, Average: b.avg, Poor: b.poor, 'Not Applicable': b.na, Unanswered: b.un }];
+        }));
+        const datasets = RATING_BUCKETS.map(bucket => ({
+            label: bucket,
+            backgroundColor: RATING_BUCKET_COLORS[bucket],
+            barPercentage: 0.9,
+            categoryPercentage: 0.9,
+            data: raw.map(l => bucketCountGet(countsByLabel?.[l], bucket))
+        }));
+        new Chart(ic, {
+            type: 'bar',
+            data: { labels, datasets },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'bottom' },
+                    tooltip: {
+                        callbacks: {
+                            title: (tt) => toEnglishLabel(raw[tt[0].dataIndex]),
+                            label: (ctx) => {
+                                const lab = raw[ctx.dataIndex];
+                                const counts = countsByLabel?.[lab] || {};
+                                const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(counts, b), 0);
+                                const val = ctx.parsed.x || 0;
+                                const pct = total ? `${(val*100/total).toFixed(1)}%` : '';
+                                return `${ctx.dataset.label}: ${Number(val).toLocaleString()}${pct ? ` (${pct})` : ''}`;
+                            }
+                        }
+                    }
+                },
+                scales: { x: { stacked: true, beginAtZero: true }, y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } } }
+            }
         });
-        new Chart(ic, { type: 'bar', data: { labels, datasets: [{ label: 'Avg', data: values, backgroundColor: '#ffa726' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.y ?? ctx.parsed.x; const n = nArr[ctx.dataIndex] || null; const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
     }
 
     // Simple heatmap: Branch x {Academics, Infrastructure, Environment, Administration}
@@ -1705,52 +1885,164 @@ function renderInfrastructureSection(data) {
         console.log('🏗️ Rendering heatmap, branch_performance:', Object.keys(data.branch_performance || {}));
         const branches = data.branch_performance || {};
         const brRatingCounts = (data.branch_rating_counts || RAW_DATA?.branch_rating_counts || {});
-        const rows = Object.entries(branches).map(([b, v]) => ({
-            Branch: b,
-            Academics: v.subject_avg,
-            Infrastructure: v.infrastructure_avg,
-            Environment: v.environment_avg,
-            Administration: v.admin_avg
-        }));
-        rows.sort((a,b)=> (a.Infrastructure??0) - (b.Infrastructure??0));
-        const sumDist = (dist) => {
-            if (!dist) return null;
-            return Object.values(dist).reduce((a,b)=> a + (Number(b) || 0), 0);
+        const cols = ['Academics','Infrastructure','Environment','Administration'];
+        const groupKey = {
+            Academics: 'Subjects',
+            Infrastructure: 'Infrastructure',
+            Environment: 'Environment',
+            Administration: 'Administrative Support'
         };
-        const nFor = (branch, col) => {
+        const paletteHue = {
+            Academics: 145,
+            Infrastructure: 35,
+            Environment: 200,
+            Administration: 285
+        };
+        const clamp01 = (x) => Math.max(0, Math.min(1, x));
+        const bgForScore = (col, v) => {
+            const h = paletteHue[col] ?? 210;
+            const t = clamp01((Number(v) || 0) / 5);
+            const sat = 70;
+            const light = 22 + t * 34;
+            return `hsl(${h}, ${sat}%, ${light}%)`;
+        };
+        const bgForNeeds = (pct) => {
+            if (pct == null || isNaN(pct)) return '#90a4ae';
+            const t = clamp01(Number(pct) / 35);
+            const hue = 120 - 120 * t;
+            return `hsl(${hue}, 78%, 38%)`;
+        };
+        const getDist = (branch, col) => {
             const groups = brRatingCounts?.[branch] || null;
-            if (!groups) return null;
-            const map = {
-                Academics: 'Subjects',
-                Infrastructure: 'Infrastructure',
-                Environment: 'Environment',
-                Administration: 'Administrative Support'
-            };
-            const g = map[col];
-            const dist = g ? groups?.[g] : null;
-            return sumDist(dist);
+            const gk = groupKey[col];
+            return (groups && gk) ? (groups[gk] || null) : null;
         };
-        const makeCell = (branch, col, val) => {
+        const answeredNFromDist = (dist) => {
+            if (!dist) return null;
+            const exc = Number(dist.Excellent) || 0;
+            const good = Number(dist.Good) || 0;
+            const avg = Number(dist.Average) || 0;
+            const poor = Number(dist.Poor) || 0;
+            const n = exc + good + avg + poor;
+            return n > 0 ? n : null;
+        };
+        const needsPctFromDist = (dist) => {
+            if (!dist) return null;
+            const exc = Number(dist.Excellent) || 0;
+            const good = Number(dist.Good) || 0;
+            const avg = Number(dist.Average) || 0;
+            const poor = Number(dist.Poor) || 0;
+            const n = exc + good + avg + poor;
+            if (!n) return null;
+            return (avg + poor) * 100 / n;
+        };
+        const overallNeedsForBranch = (branch) => {
+            let exc = 0, good = 0, avg = 0, poor = 0;
+            const perCol = {};
+            for (const c of cols) {
+                const dist = getDist(branch, c);
+                const e = Number(dist?.Excellent) || 0;
+                const g = Number(dist?.Good) || 0;
+                const a = Number(dist?.Average) || 0;
+                const p = Number(dist?.Poor) || 0;
+                exc += e; good += g; avg += a; poor += p;
+                perCol[c] = (e + g + a + p) ? ((a + p) * 100 / (e + g + a + p)) : null;
+            }
+            const n = exc + good + avg + poor;
+            const overall = n ? ((avg + poor) * 100 / n) : null;
+            let focus = null;
+            let focusPct = null;
+            for (const c of cols) {
+                const p = perCol[c];
+                if (p == null || isNaN(p)) continue;
+                if (focusPct == null || p > focusPct) { focusPct = p; focus = c; }
+            }
+            return { overall, focus, focusPct };
+        };
+        const makeRankMap = (arr, key) => {
+            const sorted = arr
+                .map(r => ({ b: r.Branch, v: r[key] }))
+                .filter(x => x.v != null && !isNaN(x.v))
+                .sort((a,b)=> (b.v - a.v));
+            const out = {};
+            for (let i=0; i<sorted.length; i++) out[sorted[i].b] = i + 1;
+            return out;
+        };
+        const rows = Object.entries(branches).map(([b, v]) => {
+            const needs = overallNeedsForBranch(b);
+            return {
+                Branch: b,
+                Overall: v.overall_avg,
+                Count: v.count,
+                Academics: v.subject_avg,
+                Infrastructure: v.infrastructure_avg,
+                Environment: v.environment_avg,
+                Administration: v.admin_avg,
+                Needs: needs
+            };
+        });
+        const overallRank = makeRankMap(rows, 'Overall');
+        const rankByCol = {
+            Academics: makeRankMap(rows, 'Academics'),
+            Infrastructure: makeRankMap(rows, 'Infrastructure'),
+            Environment: makeRankMap(rows, 'Environment'),
+            Administration: makeRankMap(rows, 'Administration')
+        };
+        rows.sort((a,b)=> (overallRank[a.Branch] || 999999) - (overallRank[b.Branch] || 999999));
+
+        const makeMetricCell = (branch, col, val) => {
             const vOk = !(val == null || isNaN(val));
             const v = vOk ? Number(val) : 0;
-            const pct = v / 5;
-            const red = Math.round((1 - pct) * 255);
-            const green = Math.round(pct * 180);
-            const nFallback = branches?.[branch]?.count || null;
-            const nn = nFallback;
-            const pctStr = vOk ? `${Math.round(pct * 100)}%` : '-';
-            const nStr = nn != null ? `n=${Number(nn).toLocaleString()}` : '';
-            const sub = (nStr || pctStr !== '-') ? `<div style="font-size:0.85em; font-weight:700; opacity:0.95; margin-top:2px;">${[nStr, pctStr !== '-' ? pctStr : ''].filter(Boolean).join(' • ')}</div>` : '';
-            return `<td style="background: rgb(${red},${green},80); color:#fff; text-align:center; padding:8px;">`+
-                `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? v.toFixed(2) : '-'}</div>${sub}</td>`;
+            const dist = getDist(branch, col);
+            const n = answeredNFromDist(dist);
+            const needsPct = needsPctFromDist(dist);
+            const rank = rankByCol[col]?.[branch] || null;
+            const pctScore = vOk ? Math.round((v / 5) * 100) : null;
+            const subBits = [];
+            if (rank != null) subBits.push(`#${rank}`);
+            if (n != null) subBits.push(`n=${Number(n).toLocaleString()}`);
+            if (pctScore != null) subBits.push(`${pctScore}%`);
+            const sub = subBits.length ? `<div style="font-size:0.85em; font-weight:800; opacity:0.95; margin-top:2px;">${subBits.join(' • ')}</div>` : '';
+            const sub2 = (needsPct != null && !isNaN(needsPct)) ? `<div style="font-size:0.82em; font-weight:800; opacity:0.95; margin-top:2px;">Needs: ${needsPct.toFixed(1)}%</div>` : '';
+            const bg = vOk ? bgForScore(col, v) : '#90a4ae';
+            return `<td style="background:${bg}; color:#fff; text-align:center; padding:8px;">`+
+                `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? v.toFixed(2) : '-'}</div>${sub}${sub2}</td>`;
         };
-        container.innerHTML = `<div style="overflow:auto"><table class="ranking-table"><thead><tr><th>Branch</th><th>Academics</th><th>Infrastructure</th><th>Environment</th><th>Administration</th></tr></thead><tbody>`+
-            rows.map(r => `<tr><td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>`+
-                `${makeCell(r.Branch, 'Academics', r.Academics)}`+
-                `${makeCell(r.Branch, 'Infrastructure', r.Infrastructure)}`+
-                `${makeCell(r.Branch, 'Environment', r.Environment)}`+
-                `${makeCell(r.Branch, 'Administration', r.Administration)}`+
-                `</tr>`).join('')+
+        const makeNeedsCell = (branch) => {
+            const n = rows.find(r => r.Branch === branch)?.Needs || { overall: null, focus: null, focusPct: null };
+            const vOk = n.overall != null && !isNaN(n.overall);
+            const bg = bgForNeeds(n.overall);
+            const focus = (n.focus && n.focusPct != null && !isNaN(n.focusPct)) ? `${toEnglishLabel(n.focus)} ${n.focusPct.toFixed(1)}%` : '-';
+            return `<td style="background:${bg}; color:#fff; text-align:center; padding:8px;">`+
+                `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? `${n.overall.toFixed(1)}%` : '-'}</div>`+
+                `<div style="font-size:0.82em; font-weight:800; opacity:0.95; margin-top:2px;">Focus: ${focus}</div></td>`;
+        };
+
+        const thStyle = (col) => {
+            const h = paletteHue[col] ?? 210;
+            return `background: hsl(${h}, 70%, 26%); color:#fff;`;
+        };
+        container.innerHTML = `<div style="overflow:auto"><table class="ranking-table"><thead><tr>`+
+            `<th style="background:#001f3f;color:#fff;">Rank</th>`+
+            `<th style="background:#001f3f;color:#fff;">Branch</th>`+
+            `<th style="${thStyle('Academics')}">Academics</th>`+
+            `<th style="${thStyle('Infrastructure')}">Infrastructure</th>`+
+            `<th style="${thStyle('Environment')}">Environment</th>`+
+            `<th style="${thStyle('Administration')}">Administration</th>`+
+            `<th style="background:hsl(8, 75%, 28%); color:#fff;">Needs Improvement</th>`+
+            `</tr></thead><tbody>`+
+            rows.map(r => {
+                const rk = overallRank[r.Branch] || null;
+                return `<tr>`+
+                    `<td style="background:#001f3f;color:#fff;padding:8px;text-align:center;font-weight:900;">${rk!=null? `#${rk}`:'-'}</td>`+
+                    `<td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>`+
+                    `${makeMetricCell(r.Branch, 'Academics', r.Academics)}`+
+                    `${makeMetricCell(r.Branch, 'Infrastructure', r.Infrastructure)}`+
+                    `${makeMetricCell(r.Branch, 'Environment', r.Environment)}`+
+                    `${makeMetricCell(r.Branch, 'Administration', r.Administration)}`+
+                    `${makeNeedsCell(r.Branch)}`+
+                    `</tr>`;
+            }).join('')+
             `</tbody></table></div>`;
     }
 }
@@ -1775,14 +2067,97 @@ function renderStrengthsSection(data) {
     const top = pairs.slice().sort((a,b)=>b[1]-a[1]).slice(0,5);
     const low = pairs.slice().sort((a,b)=>a[1]-b[1]).slice(0,5);
 
+    const sumCounts = (arr) => {
+        const out = { Excellent: 0, Good: 0, Average: 0, Poor: 0, 'Not Applicable': 0, Unanswered: 0 };
+        for (const c of (arr || [])) {
+            if (!c) continue;
+            out.Excellent += Number(c.Excellent) || 0;
+            out.Good += Number(c.Good) || 0;
+            out.Average += Number(c.Average) || 0;
+            out.Poor += Number(c.Poor) || 0;
+            out['Not Applicable'] += Number(c['Not Applicable']) || 0;
+            out.Unanswered += Number(c.Unanswered) || 0;
+        }
+        return out;
+    };
+
+    const countsForKey = (key) => {
+        const k = String(key || '').trim();
+        const overall = data.overall_rating_counts || {};
+        if (overall[k]) return overall[k];
+        if (k === 'Communication') {
+            const det = data.communication_metrics_detail || {};
+            const arr = Object.values(det).map(o => o?.rating_counts).filter(Boolean);
+            return sumCounts(arr);
+        }
+        if (k === 'Safety') {
+            const env = data.category_performance?.['Environment Quality'] || {};
+            const arr = [];
+            for (const [name, obj] of Object.entries(env)) {
+                const low = String(name).toLowerCase();
+                if (low.includes('safety') || low.includes('secure') || low.includes('security')) {
+                    const dist = obj?.rating_distribution || {};
+                    const b = parseRatingBuckets(dist);
+                    arr.push({ Excellent: b.exc, Good: b.good, Average: b.avg, Poor: b.poor, 'Not Applicable': b.na, Unanswered: b.un });
+                }
+            }
+            return sumCounts(arr);
+        }
+        if (k === 'Hygiene') {
+            const infra = data.category_performance?.['Infrastructure'] || {};
+            const arr = [];
+            for (const [name, obj] of Object.entries(infra)) {
+                const low = String(name).toLowerCase();
+                if (low.includes('hygiene') || low.includes('clean')) {
+                    const dist = obj?.rating_distribution || {};
+                    const b = parseRatingBuckets(dist);
+                    arr.push({ Excellent: b.exc, Good: b.good, Average: b.avg, Poor: b.poor, 'Not Applicable': b.na, Unanswered: b.un });
+                }
+            }
+            return sumCounts(arr);
+        }
+        return null;
+    };
+
+    const hasAny = (counts) => {
+        if (!counts) return false;
+        const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(counts, b), 0);
+        return total > 0;
+    };
+
+    const buildCountsMap = (items) => {
+        const labels = items.map(([k]) => k);
+        const map = {};
+        for (const l of labels) {
+            const c = countsForKey(l);
+            if (hasAny(c)) map[l] = c;
+        }
+        const filtered = labels.filter(l => map[l]);
+        return { labels: filtered, countsByLabel: map };
+    };
+
     const strengthCtx = (typeof resetCanvas === 'function' ? resetCanvas('topStrengthsChart') : null) || document.getElementById('topStrengthsChart')?.getContext('2d');
     if (strengthCtx) {
-        new Chart(strengthCtx, { type: 'bar', data: { labels: top.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Avg', data: top.map(x=>x[1]), backgroundColor: '#26a69a' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
+        const el = document.getElementById('topStrengthsChart');
+        const { labels, countsByLabel } = buildCountsMap(top);
+        if (el && el.parentElement) {
+            const h = Math.max(240, labels.length * 56);
+            el.parentElement.style.height = h + 'px';
+            try { el.height = h; } catch(_) {}
+        }
+        if (labels.length) renderBucketStackedChart('topStrengthsChart', labels, countsByLabel, { indexAxis: 'y' });
     }
 
     const impCtx = (typeof resetCanvas === 'function' ? resetCanvas('topImprovementsChart') : null) || document.getElementById('topImprovementsChart')?.getContext('2d');
     if (impCtx) {
-        new Chart(impCtx, { type: 'bar', data: { labels: low.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Avg', data: low.map(x=>x[1]), backgroundColor: '#ef5350' }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const n = findItemCountInCategories(data, lab); const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
+        const el = document.getElementById('topImprovementsChart');
+        const { labels, countsByLabel } = buildCountsMap(low);
+        if (el && el.parentElement) {
+            const h = Math.max(240, labels.length * 56);
+            el.parentElement.style.height = h + 'px';
+            try { el.height = h; } catch(_) {}
+        }
+        if (labels.length) renderBucketStackedChart('topImprovementsChart', labels, countsByLabel, { indexAxis: 'y' });
     }
 }
 

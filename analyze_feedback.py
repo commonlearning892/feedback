@@ -191,7 +191,62 @@ def canonicalize_rating(value):
         return 'Average'
     if 'poor' in s or 'மோசம்' in s or 'needs' in s or 'need' in s or 'improve' in s or 'முன்னேற்றம்' in s:
         return 'Poor'
+    try:
+        n = int(float(str(value).strip()))
+        if n == 5:
+            return 'Excellent'
+        if n == 4:
+            return 'Good'
+        if n == 3:
+            return 'Average'
+        if n in (1, 2):
+            return 'Poor'
+    except Exception:
+        pass
     return None
+
+def bucket_from_numeric_avg(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return 'Unanswered'
+    try:
+        num = float(v)
+    except Exception:
+        return 'Unanswered'
+    if np.isnan(num):
+        return 'Unanswered'
+    r = int(round(num))
+    if r >= 5:
+        return 'Excellent'
+    if r == 4:
+        return 'Good'
+    if r == 3:
+        return 'Average'
+    if r <= 2:
+        return 'Poor'
+    return 'Unanswered'
+
+def bucket_counts_from_avg_series(series):
+    counts = {'Excellent': 0, 'Good': 0, 'Average': 0, 'Poor': 0, 'Not Applicable': 0, 'Unanswered': 0}
+    for v in series:
+        b = bucket_from_numeric_avg(v)
+        counts[b] = counts.get(b, 0) + 1
+    return counts
+
+def bucket_counts_from_rating_columns(df_subset, cols):
+    counts = {'Excellent': 0, 'Good': 0, 'Average': 0, 'Poor': 0, 'Not Applicable': 0, 'Unanswered': 0}
+    for col in cols:
+        if col not in df_subset.columns:
+            continue
+        for v in df_subset[col].values:
+            if pd.isna(v) or v == '':
+                counts['Unanswered'] += 1
+                continue
+            cat = canonicalize_rating(v)
+            if cat is None:
+                counts['Unanswered'] += 1
+            else:
+                counts[cat] = counts.get(cat, 0) + 1
+    return counts
 
 def normalize_rating(value):
     """Convert rating strings to numeric values"""
@@ -317,6 +372,7 @@ env_cols = {}
 infra_cols = {}
 parent_cols = {}
 admin_cols = {}
+excellence_cols = {}
 
 for col in df.columns:
     lowc = str(col).lower()
@@ -340,6 +396,11 @@ for col in df.columns:
         if match:
             key = match.group(1).split('(')[0].strip()[:50]
             admin_cols[key] = col
+    elif 'program for excellence' in lowc:
+        match = re.search(r'\[(.*?)\]', col)
+        if match:
+            key = match.group(1).split('(')[0].strip()[:80]
+            excellence_cols[key] = col
 
 # Convert ratings to numeric
 for col in df.columns:
@@ -440,6 +501,18 @@ def canonicalize_rating(value):
         return 'Average'
     if 'poor' in s or 'மோசம்' in s or 'needs' in s or 'need' in s or 'improve' in s or 'முன்னேற்றம்' in s:
         return 'Poor'
+    try:
+        n = int(float(str(value).strip()))
+        if n == 5:
+            return 'Excellent'
+        if n == 4:
+            return 'Good'
+        if n == 3:
+            return 'Average'
+        if n in (1, 2):
+            return 'Poor'
+    except Exception:
+        pass
     return None
 
 def parse_reasons(value):
@@ -507,7 +580,14 @@ stats = {
         'Infrastructure': {},
         'Parent-Teacher Interaction': {},
         'Administrative Support': {}
-    }
+    },
+    'branch_category_performance': {},
+    'overall_rating_counts': {},
+    'overall_rating_counts_by_branch': {},
+    'communication_metrics_detail': {},
+    'communication_metrics_detail_by_branch': {},
+    'program_excellence': {},
+    'program_excellence_by_branch': {}
 }
 
 # Branch-wise analysis
@@ -676,6 +756,82 @@ for admin_name, admin_col in admin_cols.items():
         'rating_distribution': df[admin_col].value_counts().to_dict()
     }
 
+branch_cat_perf = {}
+for branch, group in df.groupby(branch_col):
+    out = {
+        'Environment Quality': {},
+        'Infrastructure': {},
+        'Parent-Teacher Interaction': {},
+        'Administrative Support': {}
+    }
+    for env_name, env_col in env_cols.items():
+        env_numeric = env_col + '_numeric'
+        if env_numeric not in group.columns:
+            continue
+        ratings = group[env_numeric].replace(0, np.nan)
+        out['Environment Quality'][env_name] = {
+            'average': float(ratings.mean()),
+            'rating_distribution': group[env_col].value_counts().to_dict()
+        }
+    for infra_name, infra_col in infra_cols.items():
+        infra_numeric = infra_col + '_numeric'
+        if infra_numeric not in group.columns:
+            continue
+        ratings = group[infra_numeric].replace(0, np.nan)
+        out['Infrastructure'][infra_name] = {
+            'average': float(ratings.mean()),
+            'rating_distribution': group[infra_col].value_counts().to_dict()
+        }
+    for parent_name, parent_col in parent_cols.items():
+        parent_numeric = parent_col + '_numeric'
+        if parent_numeric not in group.columns:
+            continue
+        ratings = group[parent_numeric].replace(0, np.nan)
+        out['Parent-Teacher Interaction'][parent_name] = {
+            'average': float(ratings.mean()),
+            'rating_distribution': group[parent_col].value_counts().to_dict()
+        }
+    for admin_name, admin_col in admin_cols.items():
+        admin_numeric = admin_col + '_numeric'
+        if admin_numeric not in group.columns:
+            continue
+        ratings = group[admin_numeric].replace(0, np.nan)
+        out['Administrative Support'][admin_name] = {
+            'average': float(ratings.mean()),
+            'rating_distribution': group[admin_col].value_counts().to_dict()
+        }
+    branch_cat_perf[branch] = out
+stats['branch_category_performance'] = branch_cat_perf
+
+prog_exc = {}
+for name, col in excellence_cols.items():
+    num = col + '_numeric'
+    if num not in df.columns:
+        continue
+    ratings = df[num].replace(0, np.nan)
+    prog_exc[name] = {
+        'average': float(ratings.mean()),
+        'rating_counts': bucket_counts_from_avg_series(ratings),
+        'rating_distribution': df[col].value_counts().to_dict()
+    }
+stats['program_excellence'] = prog_exc
+
+prog_exc_by_branch = {}
+for branch, group in df.groupby(branch_col):
+    out = {}
+    for name, col in excellence_cols.items():
+        num = col + '_numeric'
+        if num not in group.columns:
+            continue
+        ratings = group[num].replace(0, np.nan)
+        out[name] = {
+            'average': float(ratings.mean()),
+            'rating_counts': bucket_counts_from_avg_series(ratings),
+            'rating_distribution': group[col].value_counts().to_dict()
+        }
+    prog_exc_by_branch[branch] = out
+stats['program_excellence_by_branch'] = prog_exc_by_branch
+
 # Rankings - Top performers
 def create_ranking(data_dict, metric='overall_avg'):
     ranking = sorted(data_dict.items(), key=lambda x: x[1].get(metric, 0), reverse=True)
@@ -702,6 +858,28 @@ def clean_nan(obj):
 
 # Executive summary KPIs and additional aggregations
 stats['summary']['overall_avg'] = float(df['Overall_Avg'].mean())
+
+# Overall + per-branch bucket counts for key categories (respondent-level)
+try:
+    stats['overall_rating_counts'] = {
+        'Overall Satisfaction': bucket_counts_from_avg_series(df['Overall_Avg']),
+        'Academics': bucket_counts_from_avg_series(df['Subject_Avg']),
+        'Environment': bucket_counts_from_avg_series(df['Environment_Avg']),
+        'Infrastructure': bucket_counts_from_avg_series(df['Infrastructure_Avg']),
+        'Administration': bucket_counts_from_avg_series(df['Admin_Avg']),
+    }
+    by_branch = {}
+    for branch, g in df.groupby(branch_col):
+        by_branch[branch] = {
+            'Overall Satisfaction': bucket_counts_from_avg_series(g['Overall_Avg']),
+            'Academics': bucket_counts_from_avg_series(g['Subject_Avg']),
+            'Environment': bucket_counts_from_avg_series(g['Environment_Avg']),
+            'Infrastructure': bucket_counts_from_avg_series(g['Infrastructure_Avg']),
+            'Administration': bucket_counts_from_avg_series(g['Admin_Avg']),
+        }
+    stats['overall_rating_counts_by_branch'] = by_branch
+except Exception:
+    pass
 
 category_scores = {
     'Academics': float(df['Subject_Avg'].mean()),
@@ -785,30 +963,71 @@ stats['environment_focus_by_branch'] = env_focus_by_branch
 # Communication metrics (common keywords) overall and per branch
 def compute_comm_metrics(df_subset):
     cm = {}
-    for col in df.columns:
+    cols_by_label = {}
+    for col in df_subset.columns:
         low = str(col).lower()
         label = None
         if 'front office' in low or 'front-office' in low:
             label = 'Front Office Support'
-        elif 'leadership' in low or 'principal access' in low or 'access' in low:
+        elif 'leadership' in low or 'principal access' in low or ('access' in low and 'principal' in low):
             label = 'Leadership Access'
         elif 'app' in low and ('usability' in low or 'use' in low):
             label = 'App Usability'
-        elif 'timely updates' in low or 'timely' in low or 'updates' in low:
+        elif 'timely updates' in low:
             label = 'Timely Updates'
         if label:
-            num_col = col + '_numeric'
-            if num_col in df_subset.columns:
-                cm[label] = float(df_subset[num_col].replace(0, np.nan).mean())
+            cols_by_label.setdefault(label, []).append(col)
+    for label, cols in cols_by_label.items():
+        num_cols = [c + '_numeric' for c in cols if (c + '_numeric') in df_subset.columns]
+        if not num_cols:
+            continue
+        cm[label] = float(df_subset[num_cols].replace(0, np.nan).mean(axis=1).mean())
     return cm
+
+def compute_comm_metrics_detail(df_subset):
+    out = {}
+    cols_by_label = {}
+    for col in df_subset.columns:
+        low = str(col).lower()
+        label = None
+        if 'front office' in low or 'front-office' in low:
+            label = 'Front Office Support'
+        elif 'leadership' in low or 'principal access' in low or ('access' in low and 'principal' in low):
+            label = 'Leadership Access'
+        elif 'app' in low and ('usability' in low or 'use' in low):
+            label = 'App Usability'
+        elif 'timely updates' in low:
+            label = 'Timely Updates'
+        if label:
+            cols_by_label.setdefault(label, []).append(col)
+    for label, cols in cols_by_label.items():
+        num_cols = [c + '_numeric' for c in cols if (c + '_numeric') in df_subset.columns]
+        if num_cols:
+            row_mean = df_subset[num_cols].replace(0, np.nan).mean(axis=1)
+            avg = float(row_mean.mean())
+            counts = bucket_counts_from_avg_series(row_mean)
+        else:
+            avg = None
+            counts = {'Excellent': 0, 'Good': 0, 'Average': 0, 'Poor': 0, 'Not Applicable': 0, 'Unanswered': int(len(df_subset))}
+        out[label] = {
+            'average': avg,
+            'rating_counts': counts
+        }
+    return out
 
 comm_metrics = compute_comm_metrics(df)
 stats['communication_metrics'] = comm_metrics
+stats['communication_metrics_detail'] = compute_comm_metrics_detail(df)
 
 comm_by_branch = {}
 for branch, group in df.groupby(branch_col):
     comm_by_branch[branch] = compute_comm_metrics(group)
 stats['communication_metrics_by_branch'] = comm_by_branch
+
+comm_detail_by_branch = {}
+for branch, group in df.groupby(branch_col):
+    comm_detail_by_branch[branch] = compute_comm_metrics_detail(group)
+stats['communication_metrics_detail_by_branch'] = comm_detail_by_branch
 
 # Concern handling role-wise averages (overall and per branch)
 concern_roles = {}
