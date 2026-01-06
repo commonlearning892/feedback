@@ -42,6 +42,43 @@ def _normalize_text(s):
     t = re.sub(r"\s+", " ", t)
     return t
 
+CANON_BRANCH_COL = 'Name of the Branch( கிளையின் பெயர்)'
+CANON_CLASS_COL = 'Class( வகுப்பு )'
+CANON_ORIENTATION_COL = 'Orientation( பயிற்சி வகை )'
+CANON_LANGUAGE_COL = 'II Language( இரண்டாம் மொழிப்பாடம்) '
+
+def _coalesce_key_columns(df_in):
+    cols = list(df_in.columns)
+
+    def _match_start(col, starts):
+        low = _normalize_text(col)
+        return any(low.startswith(s) for s in starts)
+
+    def _find_sources(starts):
+        return [c for c in cols if _match_start(c, starts)]
+
+    def _coalesce(target, sources):
+        if target not in df_in.columns:
+            df_in[target] = None
+        for src in sources:
+            if src not in df_in.columns or src == target:
+                continue
+            cur = df_in[target]
+            try:
+                cur_missing = cur.isna() | (cur.astype(str).str.strip() == '')
+            except Exception:
+                cur_missing = cur.isna()
+            df_in[target] = cur.where(~cur_missing, df_in[src])
+        for src in sources:
+            if src in df_in.columns and src != target:
+                df_in.drop(columns=[src], inplace=True)
+
+    _coalesce(CANON_BRANCH_COL, _find_sources(['name of the branch', 'branch']))
+    _coalesce(CANON_CLASS_COL, _find_sources(['class']))
+    _coalesce(CANON_ORIENTATION_COL, _find_sources(['orientation']))
+    _coalesce(CANON_LANGUAGE_COL, _find_sources(['ii language']))
+    return df_in
+
 def try_read_excel_with_header_detection(path):
     try:
         df0 = pd.read_excel(path, header=None)
@@ -82,6 +119,10 @@ for path in input_files_used:
                 continue
             try:
                 _df.columns = [str(c).strip() for c in _df.columns]
+            except Exception:
+                pass
+            try:
+                _df = _coalesce_key_columns(_df)
             except Exception:
                 pass
             _df['Segment'] = seg
@@ -174,10 +215,10 @@ def normalize_rating(value):
     return 0
 
 # Extract key columns
-branch_col = 'Name of the Branch( கிளையின் பெயர்)'
-class_col = 'Class( வகுப்பு )'
-orientation_col = 'Orientation( பயிற்சி வகை )'
-language_col = 'II Language( இரண்டாம் மொழிப்பாடம்) '
+branch_col = CANON_BRANCH_COL
+class_col = CANON_CLASS_COL
+orientation_col = CANON_ORIENTATION_COL
+language_col = CANON_LANGUAGE_COL
 
 def normalize_branch_name(s):
     if pd.isna(s):
