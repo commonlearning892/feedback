@@ -87,6 +87,45 @@
         }
         .ranking-table td { padding: 14px 15px; border-bottom: 2px solid #e3e8ef; }
         .ranking-table tr:hover { background: linear-gradient(135deg, #fff9e6 0%, #ffe6cc 100%); }
+
+        /* Compact tables under charts (Avg + bucket counts) */
+        #summaryCategoryTable, #communicationTable, #adminTable, #infraCategoryTable, #programExcellenceTable {
+            margin-top: 14px;
+            font-size: 0.9em;
+        }
+        #summaryCategoryTable th, #communicationTable th, #adminTable th, #infraCategoryTable th, #programExcellenceTable th {
+            font-size: 0.95em;
+            font-weight: 700;
+        }
+        #summaryCategoryTable th, #summaryCategoryTable td,
+        #communicationTable th, #communicationTable td,
+        #adminTable th, #adminTable td,
+        #infraCategoryTable th, #infraCategoryTable td,
+        #programExcellenceTable th, #programExcellenceTable td {
+            padding: 10px 12px;
+        }
+
+        /* Single-line compact rendering for Overall Satisfaction by Category table */
+        #summaryCategoryTableWrap {
+            overflow-x: auto;
+            border: 2px solid rgba(0, 31, 63, 0.12);
+            border-radius: 12px;
+            background: #ffffff;
+        }
+        #summaryCategoryTable {
+            white-space: nowrap;
+            width: max-content;
+            min-width: 100%;
+            margin-top: 0;
+            font-size: 0.98em;
+        }
+        #summaryCategoryTable thead th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+        #summaryCategoryTable th, #summaryCategoryTable td { white-space: nowrap; padding: 10px 12px; }
+        #summaryCategoryTable tbody tr:nth-child(even) { background: rgba(0, 61, 122, 0.04); }
         .score-badge { display: inline-block; padding: 6px 18px; border-radius: 25px; font-weight: bold; color: white; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
         .score-excellent { background: linear-gradient(135deg, #4caf50 0%, #45a049 100%); }
         .score-good { background: linear-gradient(135deg, #2196f3 0%, #1976d2 100%); }
@@ -212,6 +251,9 @@
                     <div class="chart-container">
                         <h2>Overall Satisfaction by Category</h2>
                         <div class="chart-wrapper"><canvas id="summaryCategoryChart"></canvas></div>
+                        <div id="summaryCategoryTableWrap">
+                            <table class="ranking-table" id="summaryCategoryTable"></table>
+                        </div>
                     </div>
                     <div class="chart-container">
                         <h2>Recommendation Status</h2>
@@ -279,10 +321,12 @@
                 <div class="chart-container">
                     <h2>Communication Effectiveness</h2>
                     <div class="chart-wrapper"><canvas id="communicationChart"></canvas></div>
+                    <table class="ranking-table" id="communicationTable"></table>
                 </div>
                 <div class="chart-container">
                     <h2>Administrative Support Ratings</h2>
                     <div class="chart-wrapper"><canvas id="adminChart"></canvas></div>
+                    <table class="ranking-table" id="adminTable"></table>
                 </div>
                 <div class="chart-container">
                     <h2>Concern Resolution Satisfaction</h2>
@@ -299,6 +343,7 @@
                 <div class="chart-container">
                     <h2>Infrastructure Category Ratings</h2>
                     <div class="chart-wrapper"><canvas id="infraCategoryChart"></canvas></div>
+                    <table class="ranking-table" id="infraCategoryTable"></table>
                 </div>
                 <div class="chart-container">
                     <h2>Needs Improvement Heatmap</h2>

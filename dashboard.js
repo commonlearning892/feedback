@@ -261,6 +261,114 @@ function bucketCountGet(counts, bucket) {
     return 0;
 }
 
+function avgFromBucketCounts(counts) {
+    const exc = bucketCountGet(counts, 'Excellent');
+    const good = bucketCountGet(counts, 'Good');
+    const avg = bucketCountGet(counts, 'Average');
+    const poor = bucketCountGet(counts, 'Poor');
+    const denom = exc + good + avg + poor;
+    if (!denom) return null;
+    return (5 * exc + 4 * good + 3 * avg + 1 * poor) / denom;
+}
+
+function fmtAvgWithPct(avg) {
+    if (avg == null || isNaN(avg)) return '-';
+    const pct = (Number(avg) / 5) * 100;
+    return `${Number(avg).toFixed(2)}/5 (${pct.toFixed(1)}%)`;
+}
+
+function renderAvgBucketsTable(tableId, rows) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const isSummary = tableId === 'summaryCategoryTable';
+    if (isSummary) {
+        table.style.tableLayout = 'auto';
+        table.style.width = 'max-content';
+        table.style.minWidth = '100%';
+        table.style.wordBreak = 'normal';
+        table.style.whiteSpace = 'nowrap';
+    } else {
+        table.style.tableLayout = 'fixed';
+        table.style.width = '100%';
+        table.style.wordBreak = 'break-word';
+        table.style.whiteSpace = 'normal';
+    }
+
+    const header = '<thead><tr><th>Item</th><th style="text-align:right;">Avg</th><th style="text-align:right;">Excellent</th><th style="text-align:right;">Good</th><th style="text-align:right;">Average</th><th style="text-align:right;">Poor</th><th style="text-align:right;">Not Applicable</th><th style="text-align:right;">Unanswered</th><th style="text-align:right;">Total</th></tr></thead>';
+    const body = (rows || []).map(r => {
+        const label = r?.label;
+        const counts = r?.counts || {};
+        const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(counts, b), 0);
+        const fmt = (n) => {
+            const v = Number(n) || 0;
+            return total ? `${v.toLocaleString()} (${(v*100/total).toFixed(1)}%)` : v.toLocaleString();
+        };
+        const avg = (r && r.avg != null && !isNaN(r.avg)) ? Number(r.avg) : avgFromBucketCounts(counts);
+        const numCell = (html) => `<td style="text-align:right; font-variant-numeric: tabular-nums;">${html}</td>`;
+        return `<tr>`+
+            `<td>${toEnglishLabel(label)}</td>`+
+            `${numCell(fmtAvgWithPct(avg))}`+
+            `${numCell(fmt(bucketCountGet(counts,'Excellent')))}`+
+            `${numCell(fmt(bucketCountGet(counts,'Good')))}`+
+            `${numCell(fmt(bucketCountGet(counts,'Average')))}`+
+            `${numCell(fmt(bucketCountGet(counts,'Poor')))}`+
+            `${numCell(fmt(bucketCountGet(counts,'Not Applicable')))}`+
+            `${numCell(fmt(bucketCountGet(counts,'Unanswered')))}`+
+            `${numCell(total.toLocaleString())}`+
+        `</tr>`;
+    }).join('');
+    table.innerHTML = header + `<tbody>${body}</tbody>`;
+}
+
+const AvgValueLabelPlugin = {
+    id: 'avgValueLabel',
+    afterDatasetsDraw(chart, args, pluginOptions) {
+        try {
+            const opts = pluginOptions || {};
+            const countsByLabel = opts.countsByLabel || null;
+            if (!countsByLabel) return;
+            const labelsFull = opts.labelsFull || null;
+            if (!labelsFull) return;
+            const indexAxis = chart?.options?.indexAxis || 'x';
+            const ctx = chart.ctx;
+            const dsCount = chart.data.datasets?.length || 0;
+            if (!dsCount) return;
+            const lastDs = chart.getDatasetMeta(dsCount - 1);
+            if (!lastDs || !lastDs.data) return;
+
+            const fontSize = opts.fontSize || 11;
+            const color = opts.color || '#001f3f';
+            const pad = opts.pad || 6;
+
+            ctx.save();
+            ctx.font = `800 ${fontSize}px Inter, -apple-system, Segoe UI, Roboto, Arial`;
+            ctx.fillStyle = color;
+            ctx.textAlign = (indexAxis === 'y') ? 'left' : 'center';
+            ctx.textBaseline = 'middle';
+
+            for (let i = 0; i < labelsFull.length; i++) {
+                const key = labelsFull[i];
+                const counts = countsByLabel[key] || {};
+                const avg = avgFromBucketCounts(counts);
+                if (avg == null || isNaN(avg)) continue;
+                const txt = Number(avg).toFixed(2);
+                const el = lastDs.data[i];
+                if (!el) continue;
+
+                const props = el.getProps(['x','y'], true);
+                if (indexAxis === 'y') {
+                    // Horizontal bars: draw to the right end
+                    ctx.fillText(txt, props.x + pad, props.y);
+                } else {
+                    // Vertical bars: draw above
+                    ctx.fillText(txt, props.x, props.y - pad);
+                }
+            }
+            ctx.restore();
+        } catch (_) {}
+    }
+};
+
 function renderBucketStackedChart(canvasId, labelList, countsByLabel, opts={}) {
     const ctx = (typeof resetCanvas === 'function' ? resetCanvas(canvasId) : null) || document.getElementById(canvasId)?.getContext('2d');
     if (!ctx) return;
@@ -284,6 +392,7 @@ function renderBucketStackedChart(canvasId, labelList, countsByLabel, opts={}) {
             indexAxis,
             plugins: {
                 legend: { position: 'bottom' },
+                avgValueLabel: opts.showAvgLabel ? { countsByLabel, labelsFull, fontSize: opts.avgFontSize || 11 } : false,
                 tooltip: {
                     callbacks: {
                         title: (tt) => toEnglishLabel(labelsFull[tt[0].dataIndex]),
@@ -302,7 +411,8 @@ function renderBucketStackedChart(canvasId, labelList, countsByLabel, opts={}) {
                 x: { stacked: true, beginAtZero: true },
                 y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } }
             }
-        }
+        },
+        plugins: [AvgValueLabelPlugin]
     });
 }
 
@@ -1039,6 +1149,7 @@ function renderAdminChart(data) {
             maintainAspectRatio: false,
             plugins: {
                 legend: { position: 'bottom' },
+                avgValueLabel: { countsByLabel, labelsFull, fontSize: 11 },
                 tooltip: {
                     callbacks: {
                         title: (tt) => toEnglishLabel(labelsFull[tt[0].dataIndex]),
@@ -1054,8 +1165,17 @@ function renderAdminChart(data) {
                 }
             },
             scales: { x: { stacked: true, beginAtZero: true }, y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } } }
-        }
+        },
+        plugins: [AvgValueLabelPlugin]
     });
+
+    try {
+        renderAvgBucketsTable('adminTable', labelsFull.map(l => ({
+            label: l,
+            avg: adm?.[l]?.average ?? null,
+            counts: countsByLabel?.[l] || {}
+        })));
+    } catch (_) {}
 }
 
 // =============== New 7-section Dashboard Renderers ===============
@@ -1137,7 +1257,16 @@ function renderExecutiveSummary(data) {
             el.parentElement.style.height = h + 'px';
             try { el.height = h; } catch(_) {}
         }
-        if (labels.length) renderBucketStackedChart('summaryCategoryChart', labels, countsByLabel, { indexAxis: 'y' });
+        if (labels.length) renderBucketStackedChart('summaryCategoryChart', labels, countsByLabel, { indexAxis: 'y', showAvgLabel: true });
+
+        const avgMap = {
+            'Overall Satisfaction': data.summary?.overall_avg ?? null,
+            'Academics': data.summary?.category_scores?.Academics ?? null,
+            'Environment': data.summary?.category_scores?.Environment ?? null,
+            'Infrastructure': data.summary?.category_scores?.Infrastructure ?? null,
+            'Administration': data.summary?.category_scores?.Administration ?? null,
+        };
+        renderAvgBucketsTable('summaryCategoryTable', labels.map(l => ({ label: l, avg: avgMap[l], counts: countsByLabel[l] })));
     } catch (e) { console.error(e); }
 
     const rec = data.recommendation?.distribution || {};
@@ -1451,14 +1580,14 @@ function renderProgramExcellence(data) {
     }
 
     const countsByLabel = Object.fromEntries(keys.map(k => [k, pe[k]?.rating_counts || {}]));
-    renderBucketStackedChart('programExcellenceChart', keys, countsByLabel, { indexAxis: 'y' });
+    renderBucketStackedChart('programExcellenceChart', keys, countsByLabel, { indexAxis: 'y', showAvgLabel: true });
 
     if (table) {
         table.style.tableLayout = 'fixed';
         table.style.width = '100%';
         table.style.wordBreak = 'break-word';
         table.style.whiteSpace = 'normal';
-        const header = '<thead><tr><th>Question</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Not Applicable</th><th>Unanswered</th><th>Total</th></tr></thead>';
+        const header = '<thead><tr><th>Question</th><th>Avg</th><th>Excellent</th><th>Good</th><th>Average</th><th>Poor</th><th>Not Applicable</th><th>Unanswered</th><th>Total</th></tr></thead>';
         const rows = keys.map(k => {
             const c = pe[k]?.rating_counts || {};
             const exc = bucketCountGet(c,'Excellent');
@@ -1469,7 +1598,8 @@ function renderProgramExcellence(data) {
             const un = bucketCountGet(c,'Unanswered');
             const total = exc + good + avg + poor + na + un;
             const pct = (v) => total ? ` (${(v*100/total).toFixed(1)}%)` : '';
-            return `<tr><td>${toEnglishLabel(k)}</td><td>${exc.toLocaleString()}${pct(exc)}</td><td>${good.toLocaleString()}${pct(good)}</td><td>${avg.toLocaleString()}${pct(avg)}</td><td>${poor.toLocaleString()}${pct(poor)}</td><td>${na.toLocaleString()}${pct(na)}</td><td>${un.toLocaleString()}${pct(un)}</td><td>${total.toLocaleString()}</td></tr>`;
+            const avgScore = (pe[k]?.average != null && !isNaN(pe[k]?.average)) ? Number(pe[k].average) : avgFromBucketCounts(c);
+            return `<tr><td>${toEnglishLabel(k)}</td><td>${fmtAvgWithPct(avgScore)}</td><td>${exc.toLocaleString()}${pct(exc)}</td><td>${good.toLocaleString()}${pct(good)}</td><td>${avg.toLocaleString()}${pct(avg)}</td><td>${poor.toLocaleString()}${pct(poor)}</td><td>${na.toLocaleString()}${pct(na)}</td><td>${un.toLocaleString()}${pct(un)}</td><td>${total.toLocaleString()}</td></tr>`;
         }).join('');
         table.innerHTML = header + `<tbody>${rows}</tbody>`;
     }
@@ -1792,7 +1922,15 @@ function renderCommunicationSection(data) {
         try { el.height = h; } catch(_) {}
     }
     const countsByLabel = Object.fromEntries(keys.map(k => [k, cmDetail[k]?.rating_counts || {}]));
-    if (keys.length) renderBucketStackedChart('communicationChart', keys, countsByLabel, { indexAxis: 'y' });
+    if (keys.length) renderBucketStackedChart('communicationChart', keys, countsByLabel, { indexAxis: 'y', showAvgLabel: true });
+
+    try {
+        renderAvgBucketsTable('communicationTable', keys.map(k => ({
+            label: k,
+            avg: cmDetail?.[k]?.average ?? null,
+            counts: cmDetail?.[k]?.rating_counts || {}
+        })));
+    } catch (_) {}
     try { renderAdminChart(data); } catch(e) { }
 
     const roles = data.concern_roles || {};
@@ -1860,6 +1998,7 @@ function renderInfrastructureSection(data) {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: { position: 'bottom' },
+                    avgValueLabel: { countsByLabel, labelsFull: raw, fontSize: 11 },
                     tooltip: {
                         callbacks: {
                             title: (tt) => toEnglishLabel(raw[tt[0].dataIndex]),
@@ -1875,8 +2014,17 @@ function renderInfrastructureSection(data) {
                     }
                 },
                 scales: { x: { stacked: true, beginAtZero: true }, y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } } }
-            }
+            },
+            plugins: [AvgValueLabelPlugin]
         });
+
+        try {
+            renderAvgBucketsTable('infraCategoryTable', raw.map(l => ({
+                label: l,
+                avg: infra?.[l]?.average ?? null,
+                counts: countsByLabel?.[l] || {}
+            })));
+        } catch (_) {}
     }
 
     // Simple heatmap: Branch x {Academics, Infrastructure, Environment, Administration}
@@ -2142,7 +2290,7 @@ function renderStrengthsSection(data) {
             el.parentElement.style.height = h + 'px';
             try { el.height = h; } catch(_) {}
         }
-        if (labels.length) renderBucketStackedChart('topStrengthsChart', labels, countsByLabel, { indexAxis: 'y' });
+        if (labels.length) renderBucketStackedChart('topStrengthsChart', labels, countsByLabel, { indexAxis: 'y', showAvgLabel: true });
     }
 
     const impCtx = (typeof resetCanvas === 'function' ? resetCanvas('topImprovementsChart') : null) || document.getElementById('topImprovementsChart')?.getContext('2d');
@@ -2154,7 +2302,7 @@ function renderStrengthsSection(data) {
             el.parentElement.style.height = h + 'px';
             try { el.height = h; } catch(_) {}
         }
-        if (labels.length) renderBucketStackedChart('topImprovementsChart', labels, countsByLabel, { indexAxis: 'y' });
+        if (labels.length) renderBucketStackedChart('topImprovementsChart', labels, countsByLabel, { indexAxis: 'y', showAvgLabel: true });
     }
 }
 
