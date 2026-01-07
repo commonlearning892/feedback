@@ -1927,6 +1927,13 @@ function renderInfrastructureSection(data) {
             const n = exc + good + avg + poor;
             return n > 0 ? n : null;
         };
+        const needsCountFromDist = (dist) => {
+            if (!dist) return null;
+            const avg = Number(dist.Average) || 0;
+            const poor = Number(dist.Poor) || 0;
+            const n = avg + poor;
+            return n > 0 ? n : 0;
+        };
         const needsPctFromDist = (dist) => {
             if (!dist) return null;
             const exc = Number(dist.Excellent) || 0;
@@ -1947,18 +1954,29 @@ function renderInfrastructureSection(data) {
                 const a = Number(dist?.Average) || 0;
                 const p = Number(dist?.Poor) || 0;
                 exc += e; good += g; avg += a; poor += p;
-                perCol[c] = (e + g + a + p) ? ((a + p) * 100 / (e + g + a + p)) : null;
+                perCol[c] = {
+                    pct: (e + g + a + p) ? ((a + p) * 100 / (e + g + a + p)) : null,
+                    needCount: (a + p),
+                    answered: (e + g + a + p)
+                };
             }
             const n = exc + good + avg + poor;
             const overall = n ? ((avg + poor) * 100 / n) : null;
+            const overallNeedCount = (avg + poor);
+            const overallAnswered = n;
             let focus = null;
             let focusPct = null;
+            let focusNeedCount = null;
             for (const c of cols) {
-                const p = perCol[c];
+                const p = perCol[c]?.pct;
                 if (p == null || isNaN(p)) continue;
-                if (focusPct == null || p > focusPct) { focusPct = p; focus = c; }
+                if (focusPct == null || p > focusPct) {
+                    focusPct = p;
+                    focus = c;
+                    focusNeedCount = perCol[c]?.needCount ?? null;
+                }
             }
-            return { overall, focus, focusPct };
+            return { overall, overallNeedCount, overallAnswered, focus, focusPct, focusNeedCount };
         };
         const makeRankMap = (arr, key) => {
             const sorted = arr
@@ -2002,6 +2020,7 @@ function renderInfrastructureSection(data) {
             const dist = getDist(branch, col);
             const n = answeredNFromDist(dist);
             const needsPct = needsPctFromDist(dist);
+            const needsCount = needsCountFromDist(dist);
             const rank = rankByCol[col]?.[branch] || null;
             const pctScore = vOk ? Math.round((v / 5) * 100) : null;
             const subBits = [];
@@ -2009,18 +2028,21 @@ function renderInfrastructureSection(data) {
             if (n != null) subBits.push(`n=${Number(n).toLocaleString()}`);
             if (pctScore != null) subBits.push(`${pctScore}%`);
             const sub = subBits.length ? `<div style="font-size:0.85em; font-weight:800; opacity:0.95; margin-top:2px;">${subBits.join(' • ')}</div>` : '';
-            const sub2 = (needsPct != null && !isNaN(needsPct)) ? `<div style="font-size:0.82em; font-weight:800; opacity:0.95; margin-top:2px;">Needs: ${needsPct.toFixed(1)}%</div>` : '';
+            const sub2 = (needsPct != null && !isNaN(needsPct)) ? `<div style="font-size:0.82em; font-weight:800; opacity:0.95; margin-top:2px;">Needs: ${needsPct.toFixed(1)}% (${Number(needsCount||0).toLocaleString()})</div>` : '';
             const bg = vOk ? bgForScore(col, v) : '#90a4ae';
             return `<td style="background:${bg}; color:#fff; text-align:center; padding:8px;">`+
                 `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? v.toFixed(2) : '-'}</div>${sub}${sub2}</td>`;
         };
         const makeNeedsCell = (branch) => {
-            const n = rowByBranch?.[branch]?.Needs || { overall: null, focus: null, focusPct: null };
+            const n = rowByBranch?.[branch]?.Needs || { overall: null, overallNeedCount: null, overallAnswered: null, focus: null, focusPct: null, focusNeedCount: null };
             const vOk = n.overall != null && !isNaN(n.overall);
             const bg = bgForNeeds(n.overall);
-            const focus = (n.focus && n.focusPct != null && !isNaN(n.focusPct)) ? `${toEnglishLabel(n.focus)} ${n.focusPct.toFixed(1)}%` : '-';
+            const overallCnt = (n.overallNeedCount != null && !isNaN(n.overallNeedCount)) ? ` (${Number(n.overallNeedCount).toLocaleString()})` : '';
+            const focus = (n.focus && n.focusPct != null && !isNaN(n.focusPct))
+                ? `${toEnglishLabel(n.focus)} ${n.focusPct.toFixed(1)}%${(n.focusNeedCount != null && !isNaN(n.focusNeedCount)) ? ` (${Number(n.focusNeedCount).toLocaleString()})` : ''}`
+                : '-';
             return `<td style="background:${bg}; color:#fff; text-align:center; padding:8px;">`+
-                `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? `${n.overall.toFixed(1)}%` : '-'}</div>`+
+                `<div style="font-weight:900; font-size:1.05em; line-height:1.1;">${vOk ? `${n.overall.toFixed(1)}%${overallCnt}` : '-'}</div>`+
                 `<div style="font-size:0.82em; font-weight:800; opacity:0.95; margin-top:2px;">Focus: ${focus}</div></td>`;
         };
 
@@ -2091,37 +2113,6 @@ function renderStrengthsSection(data) {
         const k = String(key || '').trim();
         const overall = data.overall_rating_counts || {};
         if (overall[k]) return overall[k];
-        if (k === 'Communication') {
-            const det = data.communication_metrics_detail || {};
-            const arr = Object.values(det).map(o => o?.rating_counts).filter(Boolean);
-            return sumCounts(arr);
-        }
-        if (k === 'Safety') {
-            const env = data.category_performance?.['Environment Quality'] || {};
-            const arr = [];
-            for (const [name, obj] of Object.entries(env)) {
-                const low = String(name).toLowerCase();
-                if (low.includes('safety') || low.includes('secure') || low.includes('security')) {
-                    const dist = obj?.rating_distribution || {};
-                    const b = parseRatingBuckets(dist);
-                    arr.push({ Excellent: b.exc, Good: b.good, Average: b.avg, Poor: b.poor, 'Not Applicable': b.na, Unanswered: b.un });
-                }
-            }
-            return sumCounts(arr);
-        }
-        if (k === 'Hygiene') {
-            const infra = data.category_performance?.['Infrastructure'] || {};
-            const arr = [];
-            for (const [name, obj] of Object.entries(infra)) {
-                const low = String(name).toLowerCase();
-                if (low.includes('hygiene') || low.includes('clean')) {
-                    const dist = obj?.rating_distribution || {};
-                    const b = parseRatingBuckets(dist);
-                    arr.push({ Excellent: b.exc, Good: b.good, Average: b.avg, Poor: b.poor, 'Not Applicable': b.na, Unanswered: b.un });
-                }
-            }
-            return sumCounts(arr);
-        }
         return null;
     };
 

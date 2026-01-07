@@ -81,7 +81,7 @@ def _coalesce_key_columns(df_in):
 
 def try_read_excel_with_header_detection(path):
     try:
-        df0 = pd.read_excel(path, header=None)
+        df0 = pd.read_excel(path, header=None, nrows=25)
     except Exception as e:
         raise e
     header_row = None
@@ -454,6 +454,39 @@ recommend_cols = [c for c in df.columns if 'recommend' in str(c).lower()]
 app_cols = [c for c in df.columns if ' app' in str(c).lower() or 'app ' in str(c).lower() or 'application' in str(c).lower()]
 transport_cols = [c for c in df.columns if 'transport' in str(c).lower()]
 ptm_cols = [c for c in df.columns if 'parent-teacher' in str(c).lower() or 'parent–teacher' in str(c).lower() or 'ptm' in str(c).lower()]
+
+def _communication_source_cols(df_subset):
+    cols = []
+    for col in df_subset.columns:
+        if str(col).endswith('_numeric'):
+            continue
+        low = str(col).lower()
+        if 'front office' in low or 'front-office' in low:
+            cols.append(col)
+        elif 'leadership' in low or 'principal access' in low or ('access' in low and 'principal' in low):
+            cols.append(col)
+        elif 'app' in low and ('usability' in low or 'use' in low):
+            cols.append(col)
+        elif 'timely updates' in low:
+            cols.append(col)
+    return cols
+
+def _rowwise_mean_from_list(df_subset, cols_list):
+    num_cols = [c + '_numeric' for c in cols_list if (c + '_numeric') in df_subset.columns]
+    if not num_cols:
+        return np.nan
+    return df_subset[num_cols].replace(0, np.nan).mean(axis=1)
+
+comm_cols_all = _communication_source_cols(df)
+df['Communication_Avg'] = _rowwise_mean_from_list(df, comm_cols_all)
+
+safety_cols = [col for key, col in env_cols.items() if ('secure' in str(key).lower() or 'safety' in str(key).lower() or 'security' in str(key).lower())]
+df['Safety_Avg'] = _rowwise_mean_from_list(df, safety_cols)
+
+hygiene_cols = [col for key, col in infra_cols.items() if ('hygiene' in str(key).lower() or 'clean' in str(key).lower())]
+df['Hygiene_Avg'] = _rowwise_mean_from_list(df, hygiene_cols)
+
+df['PTM_Avg'] = _rowwise_mean_from_list(df, ptm_cols)
 
 sat_cols = [c for c in df.columns if 'mention two areas' in str(c).lower() or 'most satisfied' in str(c).lower() or ('you are most satisfied' in str(c).lower())]
 improve_cols = [c for c in df.columns if 'further improve' in str(c).lower() or 'can further improve' in str(c).lower() or ('choose two areas' in str(c).lower() and 'improve' in str(c).lower())]
@@ -867,6 +900,10 @@ try:
         'Environment': bucket_counts_from_avg_series(df['Environment_Avg']),
         'Infrastructure': bucket_counts_from_avg_series(df['Infrastructure_Avg']),
         'Administration': bucket_counts_from_avg_series(df['Admin_Avg']),
+        'Communication': bucket_counts_from_avg_series(df['Communication_Avg']),
+        'Safety': bucket_counts_from_avg_series(df['Safety_Avg']),
+        'Hygiene': bucket_counts_from_avg_series(df['Hygiene_Avg']),
+        'PTM': bucket_counts_from_avg_series(df['PTM_Avg']),
     }
     by_branch = {}
     for branch, g in df.groupby(branch_col):
@@ -876,6 +913,10 @@ try:
             'Environment': bucket_counts_from_avg_series(g['Environment_Avg']),
             'Infrastructure': bucket_counts_from_avg_series(g['Infrastructure_Avg']),
             'Administration': bucket_counts_from_avg_series(g['Admin_Avg']),
+            'Communication': bucket_counts_from_avg_series(g['Communication_Avg']),
+            'Safety': bucket_counts_from_avg_series(g['Safety_Avg']),
+            'Hygiene': bucket_counts_from_avg_series(g['Hygiene_Avg']),
+            'PTM': bucket_counts_from_avg_series(g['PTM_Avg']),
         }
     stats['overall_rating_counts_by_branch'] = by_branch
 except Exception:
