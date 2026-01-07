@@ -371,6 +371,54 @@ const AvgValueLabelPlugin = {
     }
 };
 
+const PieValueLabelPlugin = {
+    id: 'pieValueLabel',
+    afterDatasetsDraw(chart, args, pluginOptions) {
+        try {
+            const opts = pluginOptions || {};
+            const fontSize = opts.fontSize || 11;
+            const color = opts.color || '#ffffff';
+            const stroke = opts.stroke || 'rgba(0,0,0,0.45)';
+            const minFraction = (opts.minFraction == null) ? 0.04 : Number(opts.minFraction);
+            const dsCount = chart.data.datasets?.length || 0;
+            if (!dsCount) return;
+
+            const ctx = chart.ctx;
+            ctx.save();
+            ctx.font = `900 ${fontSize}px Inter, -apple-system, Segoe UI, Roboto, Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = color;
+            ctx.strokeStyle = stroke;
+            ctx.lineWidth = 3;
+
+            for (let di = 0; di < dsCount; di++) {
+                const meta = chart.getDatasetMeta(di);
+                if (!meta || meta.hidden || !meta.data) continue;
+                const dataArr = chart.data.datasets[di].data || [];
+                const total = dataArr.reduce((a,b)=> a + (Number(b)||0), 0);
+                if (!total) continue;
+                for (let i = 0; i < meta.data.length; i++) {
+                    const arc = meta.data[i];
+                    const val = Number(dataArr[i]) || 0;
+                    if (!val) continue;
+                    const frac = val / total;
+                    if (minFraction && frac < minFraction) continue;
+                    const props = arc.getProps(['x','y','startAngle','endAngle','innerRadius','outerRadius'], true);
+                    const angle = (props.startAngle + props.endAngle) / 2;
+                    const r = (props.innerRadius + props.outerRadius) / 2;
+                    const x = props.x + Math.cos(angle) * r;
+                    const y = props.y + Math.sin(angle) * r;
+                    const txt = val.toLocaleString();
+                    ctx.strokeText(txt, x, y);
+                    ctx.fillText(txt, x, y);
+                }
+            }
+            ctx.restore();
+        } catch (_) {}
+    }
+};
+
 const StackedValueLabelPlugin = {
     id: 'stackedValueLabel',
     afterDatasetsDraw(chart, args, pluginOptions) {
@@ -404,19 +452,22 @@ const StackedValueLabelPlugin = {
                     const rawVal = (indexAxis === 'y') ? (chart.data.datasets[di].data?.[i] ?? 0) : (chart.data.datasets[di].data?.[i] ?? 0);
                     const val = Number(rawVal) || 0;
                     if (!val) continue;
+                    const txt = Number(val).toLocaleString();
                     const props = el.getProps(['x','y','base'], true);
                     if (indexAxis === 'y') {
                         const w = props.x - props.base;
                         if (!showSegments || w < minPx) continue;
+                        const tw = ctx.measureText(txt).width;
+                        if (tw + 8 > w) continue;
                         ctx.fillStyle = color;
                         ctx.textAlign = 'center';
-                        ctx.fillText(String(val), props.base + (w / 2), props.y);
+                        ctx.fillText(txt, props.base + (w / 2), props.y);
                     } else {
                         const h = props.base - props.y;
                         if (!showSegments || h < minPx) continue;
                         ctx.fillStyle = color;
                         ctx.textAlign = 'center';
-                        ctx.fillText(String(val), props.x, props.y + (h / 2));
+                        ctx.fillText(txt, props.x, props.y + (h / 2));
                     }
                 }
             }
@@ -462,6 +513,9 @@ function renderBucketStackedChart(canvasId, labelList, countsByLabel, opts={}) {
         data: labelsFull.map(l => bucketCountGet(countsByLabel?.[l], bucket))
     }));
     const indexAxis = opts.indexAxis || 'y';
+
+    const pluginsArr = [AvgValueLabelPlugin];
+    if (opts.showCountLabels !== false) pluginsArr.push(StackedValueLabelPlugin);
     new Chart(ctx, {
         type: 'bar',
         data: { labels, datasets },
@@ -472,9 +526,19 @@ function renderBucketStackedChart(canvasId, labelList, countsByLabel, opts={}) {
             plugins: {
                 legend: { position: 'bottom' },
                 avgValueLabel: opts.showAvgLabel ? { countsByLabel, labelsFull, fontSize: opts.avgFontSize || 11 } : false,
+                stackedValueLabel: (opts.showCountLabels !== false) ? { showSegments: true, showTotal: false, fontSize: opts.countFontSize || 10, minPx: opts.countMinPx || 20 } : false,
                 tooltip: {
                     callbacks: {
-                        title: (tt) => toEnglishLabel(labelsFull[tt[0].dataIndex]),
+                        title: (tt) => {
+                            const idx = tt[0].dataIndex;
+                            const key = labelsFull[idx];
+                            const counts = countsByLabel?.[key] || {};
+                            const avg = avgFromBucketCounts(counts);
+                            const avgStr = (avg == null || isNaN(avg)) ? '-' : `${avg.toFixed(2)}/5 (${((avg/5)*100).toFixed(1)}%)`;
+                            const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(counts, b), 0);
+                            const nStr = total ? ` • n=${total.toLocaleString()}` : '';
+                            return `${toEnglishLabel(key)} — Avg ${avgStr}${nStr}`;
+                        },
                         label: (ctx) => {
                             const lab = labelsFull[ctx.dataIndex];
                             const counts = countsByLabel?.[lab] || {};
@@ -491,7 +555,7 @@ function renderBucketStackedChart(canvasId, labelList, countsByLabel, opts={}) {
                 y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } }
             }
         },
-        plugins: [AvgValueLabelPlugin]
+        plugins: pluginsArr
     });
 }
 
@@ -799,6 +863,7 @@ function renderSegmentYNMChart() {
     const maybe = labels.map(l => (agg[l].rec?.Maybe||0));
     const no = labels.map(l => (agg[l].rec?.No||0));
     const avgByLabel = Object.fromEntries(labels.map(l => [l, (agg[l].overall_avg!=null && !isNaN(agg[l].overall_avg)) ? agg[l].overall_avg : null]));
+    const totals = labels.map((_, i) => (Number(yes[i])||0) + (Number(maybe[i])||0) + (Number(no[i])||0));
     const ctx = (typeof resetCanvas === 'function' ? resetCanvas('segmentYNMChart') : null) || canvas.getContext('2d');
     new Chart(ctx, {
         type: 'bar',
@@ -817,14 +882,34 @@ function renderSegmentYNMChart() {
             layout: { padding: { right: 34 } },
             plugins: {
                 legend: { position: 'bottom' },
-                avgValueLabel: { avgByLabel, labelsFull: labels, fontSize: 11 }
+                avgValueLabel: { avgByLabel, labelsFull: labels, fontSize: 11 },
+                stackedValueLabel: { showSegments: true, showTotal: false, fontSize: 10, minPx: 20 },
+                tooltip: {
+                    callbacks: {
+                        title: (tt) => {
+                            const idx = tt[0].dataIndex;
+                            const key = labels[idx];
+                            const avg = avgByLabel?.[key];
+                            const avgStr = (avg == null || isNaN(avg)) ? '-' : `${Number(avg).toFixed(2)}/5 (${((Number(avg)/5)*100).toFixed(1)}%)`;
+                            const n = totals[idx] || 0;
+                            return `${toEnglishLabel(key)} — Avg ${avgStr} • n=${n.toLocaleString()}`;
+                        },
+                        label: (ctx) => {
+                            const idx = ctx.dataIndex;
+                            const n = totals[idx] || 0;
+                            const val = ctx.parsed.x || 0;
+                            const pct = n ? `${(val*100/n).toFixed(1)}%` : '';
+                            return `${ctx.dataset.label}: ${Number(val).toLocaleString()}${pct ? ` (${pct})` : ''}`;
+                        }
+                    }
+                }
             },
             scales: {
                 x: { stacked: true, beginAtZero: true },
                 y: { stacked: true }
             }
         },
-        plugins: [AvgValueLabelPlugin]
+        plugins: [AvgValueLabelPlugin, StackedValueLabelPlugin]
     });
 }
 
@@ -904,7 +989,7 @@ function renderSegmentComparison() {
             area.appendChild(c);
             // chart
             const ctx = canvas.getContext('2d');
-            new Chart(ctx, { type: 'doughnut', data: { labels: ['Yes','No','Maybe'], datasets: [{ data: [r.Yes||0, r.No||0, r.Maybe||0], backgroundColor: ['#43a047','#e53935','#fb8c00'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } } });
+            new Chart(ctx, { type: 'doughnut', data: { labels: ['Yes','No','Maybe'], datasets: [{ data: [r.Yes||0, r.No||0, r.Maybe||0], backgroundColor: ['#43a047','#e53935','#fb8c00'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' }, pieValueLabel: { fontSize: 11 } } }, plugins: [PieValueLabelPlugin] });
         });
     }
 
@@ -1080,7 +1165,8 @@ function renderOrientationChart(data) {
                 ]
             }]
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' }, pieValueLabel: { fontSize: 11 } } },
+        plugins: [PieValueLabelPlugin]
     });
 }
 
@@ -1127,7 +1213,8 @@ function renderClassChart(data) {
                 ]
             }]
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' }, pieValueLabel: { fontSize: 11 } } },
+        plugins: [PieValueLabelPlugin]
     });
 }
 
@@ -1235,6 +1322,7 @@ function renderAdminChart(data) {
             plugins: {
                 legend: { position: 'bottom' },
                 avgValueLabel: { countsByLabel, labelsFull, fontSize: 11 },
+                stackedValueLabel: { showSegments: true, showTotal: false, fontSize: 10, minPx: 20 },
                 tooltip: {
                     callbacks: {
                         title: (tt) => toEnglishLabel(labelsFull[tt[0].dataIndex]),
@@ -1362,7 +1450,8 @@ function renderExecutiveSummary(data) {
         new Chart(recCtx, {
             type: 'doughnut',
             data: { labels, datasets: [{ data: values, backgroundColor: ['#43a047','#e53935','#fb8c00'] }] },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' }, pieValueLabel: { fontSize: 11 } } },
+            plugins: [PieValueLabelPlugin]
         });
     }
     // Populate side KPI for % Recommend School next to the pie
@@ -1556,9 +1645,17 @@ function renderAcademicSection(data) {
                 plugins: {
                     legend: { position: 'bottom' },
                     avgValueLabel: { countsByLabel: countsBySubject, labelsFull: subjects, fontSize: 11 },
+                    stackedValueLabel: { showSegments: true, showTotal: false, fontSize: 10, minPx: 20 },
                     tooltip: {
                         callbacks: {
-                            title: (tt) => labelsFull[tt[0].dataIndex],
+                            title: (tt) => {
+                                const idx = tt[0].dataIndex;
+                                const key = subjects[idx];
+                                const avg = avgFromBucketCounts(countsBySubject?.[key] || {});
+                                const avgStr = (avg == null || isNaN(avg)) ? '-' : `${avg.toFixed(2)}/5 (${((avg/5)*100).toFixed(1)}%)`;
+                                const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(countsBySubject?.[key] || {}, b), 0);
+                                return `${labelsFull[idx]} — Avg ${avgStr} • n=${total.toLocaleString()}`;
+                            },
                             label: (ctx) => {
                                 const val = ctx.parsed.x || 0;
                                 const idx = ctx.dataIndex;
@@ -1597,7 +1694,7 @@ function renderAcademicSection(data) {
                     y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } }
                 }
             },
-            plugins: [AvgValueLabelPlugin]
+            plugins: [AvgValueLabelPlugin, StackedValueLabelPlugin]
         });
     }
     // Subject distribution counts table
@@ -1933,8 +2030,17 @@ function renderEnvironmentSection(data) {
                 plugins: {
                     legend: { position: 'bottom' },
                     avgValueLabel: { countsByLabel: countsByEnv, labelsFull: rawLabels, fontSize: 11 },
+                    stackedValueLabel: { showSegments: true, showTotal: false, fontSize: 10, minPx: 20 },
                     tooltip: {
                         callbacks: {
+                            title: (tt) => {
+                                const idx = tt[0].dataIndex;
+                                const key = rawLabels[idx];
+                                const avg = avgFromBucketCounts(countsByEnv?.[key] || {});
+                                const avgStr = (avg == null || isNaN(avg)) ? '-' : `${avg.toFixed(2)}/5 (${((avg/5)*100).toFixed(1)}%)`;
+                                const total = RATING_BUCKETS.reduce((a,b)=> a + bucketCountGet(countsByEnv?.[key] || {}, b), 0);
+                                return `${displayLabels[idx]} — Avg ${avgStr} • n=${total.toLocaleString()}`;
+                            },
                             label: (ctx) => {
                                 const val = ctx.parsed.x || 0;
                                 const raw = rawLabels[ctx.dataIndex];
@@ -1952,7 +2058,7 @@ function renderEnvironmentSection(data) {
                     y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } }
                 }
             },
-            plugins: [AvgValueLabelPlugin]
+            plugins: [AvgValueLabelPlugin, StackedValueLabelPlugin]
         });
     }
 
@@ -2040,7 +2146,7 @@ function renderCommunicationSection(data) {
     if (crc) {
         const labels = ['Yes','No','Not Applicable'];
         const values = labels.map(l => cr[l] || 0);
-        new Chart(crc, { type: 'pie', data: { labels, datasets: [{ data: values, backgroundColor: ['#43a047','#e53935','#90a4ae'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } } });
+        new Chart(crc, { type: 'pie', data: { labels, datasets: [{ data: values, backgroundColor: ['#43a047','#e53935','#90a4ae'] }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' }, pieValueLabel: { fontSize: 11 } } }, plugins: [PieValueLabelPlugin] });
     }
     // Populate concern resolution counts KPIs
     try {
