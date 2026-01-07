@@ -371,6 +371,48 @@ const AvgValueLabelPlugin = {
     }
 };
 
+const BarValueLabelPlugin = {
+    id: 'barValueLabel',
+    afterDatasetsDraw(chart, args, pluginOptions) {
+        try {
+            const opts = pluginOptions || {};
+            const datasetIndex = (opts.datasetIndex == null) ? 0 : Number(opts.datasetIndex);
+            const meta = chart.getDatasetMeta(datasetIndex);
+            if (!meta || meta.hidden || !meta.data) return;
+            const dataArr = chart.data.datasets?.[datasetIndex]?.data || [];
+            const indexAxis = chart?.options?.indexAxis || 'x';
+            const fontSize = opts.fontSize || 11;
+            const color = opts.color || '#001f3f';
+            const pad = opts.pad || 6;
+            const decimals = (opts.decimals == null) ? 2 : Number(opts.decimals);
+            const suffix = opts.suffix || '';
+
+            const ctx = chart.ctx;
+            ctx.save();
+            ctx.font = `900 ${fontSize}px Inter, -apple-system, Segoe UI, Roboto, Arial`;
+            ctx.fillStyle = color;
+            ctx.textBaseline = 'middle';
+
+            for (let i = 0; i < meta.data.length; i++) {
+                const el = meta.data[i];
+                if (!el) continue;
+                const raw = Number(dataArr[i]);
+                if (raw == null || isNaN(raw)) continue;
+                const txt = `${raw.toFixed(decimals)}${suffix}`;
+                const props = el.getProps(['x','y','base'], true);
+                if (indexAxis === 'y') {
+                    ctx.textAlign = 'left';
+                    ctx.fillText(txt, props.x + pad, props.y);
+                } else {
+                    ctx.textAlign = 'center';
+                    ctx.fillText(txt, props.x, props.y - pad);
+                }
+            }
+            ctx.restore();
+        } catch (_) {}
+    }
+};
+
 const PieValueLabelPlugin = {
     id: 'pieValueLabel',
     afterDatasetsDraw(chart, args, pluginOptions) {
@@ -810,7 +852,12 @@ function renderSegmentOverallChart() {
     if (!el || !labels.length) return;
     const values = labels.map(s => (agg[s].overall_avg==null || isNaN(agg[s].overall_avg)) ? 0 : agg[s].overall_avg);
     const ctx = (typeof resetCanvas === 'function' ? resetCanvas('segmentOverallChart') : null) || el.getContext('2d');
-    new Chart(ctx, { type: 'bar', data: { labels, datasets: [{ label: 'Overall Avg', data: values, backgroundColor: ['#42a5f5','#66bb6a','#ffa726'].slice(0, labels.length) }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } } } });
+    new Chart(ctx, {
+        type: 'bar',
+        data: { labels, datasets: [{ label: 'Overall Avg', data: values, backgroundColor: ['#42a5f5','#66bb6a','#ffa726'].slice(0, labels.length) }] },
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } }, plugins: { barValueLabel: { decimals: 2 } } },
+        plugins: [BarValueLabelPlugin]
+    });
 }
 
 function renderSegmentCountsGrid() {
@@ -1339,7 +1386,7 @@ function renderAdminChart(data) {
             },
             scales: { x: { stacked: true, beginAtZero: true }, y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } } }
         },
-        plugins: [AvgValueLabelPlugin]
+        plugins: [AvgValueLabelPlugin, StackedValueLabelPlugin]
     });
 
     try {
@@ -2198,6 +2245,7 @@ function renderInfrastructureSection(data) {
                 plugins: {
                     legend: { position: 'bottom' },
                     avgValueLabel: { countsByLabel, labelsFull: raw, fontSize: 11 },
+                    stackedValueLabel: { showSegments: true, showTotal: false, fontSize: 10, minPx: 20 },
                     tooltip: {
                         callbacks: {
                             title: (tt) => toEnglishLabel(raw[tt[0].dataIndex]),
@@ -2214,7 +2262,7 @@ function renderInfrastructureSection(data) {
                 },
                 scales: { x: { stacked: true, beginAtZero: true }, y: { stacked: true, ticks: { autoSkip: false, font: { size: 10 } } } }
             },
-            plugins: [AvgValueLabelPlugin]
+            plugins: [AvgValueLabelPlugin, StackedValueLabelPlugin]
         });
 
         try {
@@ -2537,7 +2585,40 @@ function renderBranchComparisonSection(data) {
                 return `rgb(${r},${g},${b})`;
             }
         };
-        new Chart(rankCtx, { type: 'bar', data: { labels: arr.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Overall', data: arr.map(x=>x[1]), backgroundColor: arr.map(x=>colorFor(x[1])) }] }, options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', scales: { x: { beginAtZero: true, max: 5 } }, plugins: { tooltip: { callbacks: { label: (ctx) => { const lab = ctx.label; const val = ctx.parsed.x ?? ctx.parsed.y; const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`; let n = null; try { const bp = data.branch_performance || {}; for (const [b,v] of Object.entries(bp)) { if (toEnglishLabel(b) === lab) { n = v?.count || null; break; } } } catch(_) {} return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`; } } } } } });
+        new Chart(rankCtx, {
+            type: 'bar',
+            data: { labels: arr.map(x=>toEnglishLabel(x[0])), datasets: [{ label: 'Overall', data: arr.map(x=>x[1]), backgroundColor: arr.map(x=>colorFor(x[1])) }] },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'y',
+                scales: { x: { beginAtZero: true, max: 5 } },
+                plugins: {
+                    barValueLabel: { decimals: 2 },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => {
+                                const lab = ctx.label;
+                                const val = ctx.parsed.x ?? ctx.parsed.y;
+                                const pct = `${((Number(val)||0)/5*100).toFixed(0)}%`;
+                                let n = null;
+                                try {
+                                    const bp = data.branch_performance || {};
+                                    for (const [b,v] of Object.entries(bp)) {
+                                        if (toEnglishLabel(b) === lab) {
+                                            n = v?.count || null;
+                                            break;
+                                        }
+                                    }
+                                } catch(_) {}
+                                return `${lab}: ${Number(val).toFixed(2)}/5${n? ` (n=${n.toLocaleString()})`:''} • ${pct}`;
+                            }
+                        }
+                    }
+                }
+            },
+            plugins: [BarValueLabelPlugin]
+        });
     }
 
     let brPct = (data.branch_recommendation_pct || {});
@@ -2560,7 +2641,7 @@ function renderBranchComparisonSection(data) {
         entries.sort((a,b)=>b[1]-a[1]);
         const labels = entries.slice(0,20).map(x=>toEnglishLabel(x[0]).slice(0,18));
         const values = entries.slice(0,20).map(x=>x[1]);
-        new Chart(recCtx, { type: 'bar', data: { labels, datasets: [{ label: '% Recommend', data: values, backgroundColor: '#8d6e63' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } } } });
+        new Chart(recCtx, { type: 'bar', data: { labels, datasets: [{ label: '% Recommend', data: values, backgroundColor: '#8d6e63' }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 100 } }, plugins: { barValueLabel: { decimals: 1, suffix: '%' } } }, plugins: [BarValueLabelPlugin] });
     }
 
     const scatterCtx = (typeof resetCanvas === 'function' ? resetCanvas('branchScatterChart') : null) || document.getElementById('branchScatterChart')?.getContext('2d');
