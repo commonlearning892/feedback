@@ -2470,27 +2470,47 @@ function renderInfrastructureSection(data) {
             const h = paletteHue[col] ?? 210;
             return `background: hsl(${h}, 70%, 26%); color:#fff;`;
         };
-        container.innerHTML = `<div style="overflow:auto"><table class="ranking-table"><thead><tr>`+
-            `<th style="background:#001f3f;color:#fff;">Rank</th>`+
-            `<th style="background:#001f3f;color:#fff;">Branch</th>`+
-            `<th style="${thStyle('Academics')}">Academics</th>`+
-            `<th style="${thStyle('Infrastructure')}">Infrastructure</th>`+
-            `<th style="${thStyle('Environment')}">Environment</th>`+
-            `<th style="${thStyle('Administration')}">Administration</th>`+
-            `<th style="background:hsl(8, 75%, 28%); color:#fff;">Needs Improvement</th>`+
-            `</tr></thead><tbody>`+
-            rows.map(r => {
-                const rk = getRankForDisplay(r.Branch);
-                return `<tr>`+
-                    `<td style="background:#001f3f;color:#fff;padding:8px;text-align:center;font-weight:900;">${rk!=null? `#${rk}`:'-'}</td>`+
-                    `<td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>`+
-                    `${makeMetricCell(r.Branch, 'Academics', r.Academics)}`+
+        
+        // Build table headers and rows based on selected category
+        let headerHtml = `<th style="background:#001f3f;color:#fff;">Rank</th>`+
+            `<th style="background:#001f3f;color:#fff;">Branch</th>`;
+        
+        if (selectedCategory === 'Overall') {
+            // Show all columns for Overall
+            headerHtml += `<th style="${thStyle('Academics')}">Academics</th>`+
+                `<th style="${thStyle('Infrastructure')}">Infrastructure</th>`+
+                `<th style="${thStyle('Environment')}">Environment</th>`+
+                `<th style="${thStyle('Administration')}">Administration</th>`+
+                `<th style="background:hsl(8, 75%, 28%); color:#fff;">Needs Improvement</th>`;
+        } else {
+            // Show only selected category column
+            headerHtml += `<th style="${thStyle(selectedCategory)}">${selectedCategory}</th>`;
+        }
+        
+        const rowsHtml = rows.map(r => {
+            const rk = getRankForDisplay(r.Branch);
+            let cellsHtml = `<td style="background:#001f3f;color:#fff;padding:8px;text-align:center;font-weight:900;">${rk!=null? `#${rk}`:'-'}</td>`+
+                `<td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>`;
+            
+            if (selectedCategory === 'Overall') {
+                // Show all columns
+                cellsHtml += `${makeMetricCell(r.Branch, 'Academics', r.Academics)}`+
                     `${makeMetricCell(r.Branch, 'Infrastructure', r.Infrastructure)}`+
                     `${makeMetricCell(r.Branch, 'Environment', r.Environment)}`+
                     `${makeMetricCell(r.Branch, 'Administration', r.Administration)}`+
-                    `${makeNeedsCell(r.Branch)}`+
-                    `</tr>`;
-            }).join('')+
+                    `${makeNeedsCell(r.Branch)}`;
+            } else {
+                // Show only selected category
+                cellsHtml += makeMetricCell(r.Branch, selectedCategory, r[selectedCategory]);
+            }
+            
+            return `<tr>${cellsHtml}</tr>`;
+        }).join('');
+        
+        container.innerHTML = `<div style="overflow:auto"><table class="ranking-table"><thead><tr>`+
+            headerHtml+
+            `</tr></thead><tbody>`+
+            rowsHtml+
             `</tbody></table></div>`;
         
         // Add event listener to filter dropdown
