@@ -855,7 +855,13 @@ function renderSegmentOverallChart() {
     new Chart(ctx, {
         type: 'bar',
         data: { labels, datasets: [{ label: 'Overall Avg', data: values, backgroundColor: ['#42a5f5','#66bb6a','#ffa726'].slice(0, labels.length) }] },
-        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, max: 5 } }, plugins: { barValueLabel: { decimals: 2 } } },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            layout: { padding: { top: 20 } },
+            scales: { y: { beginAtZero: true, max: 5 } },
+            plugins: { barValueLabel: { decimals: 2, fontSize: 12 } }
+        },
         plugins: [BarValueLabelPlugin]
     });
 }
@@ -2403,11 +2409,30 @@ function renderInfrastructureSection(data) {
             Environment: makeRankMap(rowsAll, 'Environment'),
             Administration: makeRankMap(rowsAll, 'Administration')
         };
+        // Get selected category filter
+        const filterSelect = document.getElementById('heatmapCategoryFilter');
+        const selectedCategory = filterSelect?.value || 'Overall';
+        
+        // Sort by selected category
         if (!CURRENT_BRANCH) {
-            rowsAll.sort((a,b)=> (overallRank[a.Branch] || 999999) - (overallRank[b.Branch] || 999999));
+            if (selectedCategory === 'Overall') {
+                rowsAll.sort((a,b)=> (overallRank[a.Branch] || 999999) - (overallRank[b.Branch] || 999999));
+            } else {
+                const catRank = rankByCol[selectedCategory] || {};
+                rowsAll.sort((a,b)=> (catRank[a.Branch] || 999999) - (catRank[b.Branch] || 999999));
+            }
         }
 
         const rows = CURRENT_BRANCH ? rowsAll.filter(r => r.Branch === CURRENT_BRANCH) : rowsAll;
+
+        // Update rank display based on selected category
+        const getRankForDisplay = (branch) => {
+            if (selectedCategory === 'Overall') {
+                return overallRank[branch] || null;
+            } else {
+                return rankByCol[selectedCategory]?.[branch] || null;
+            }
+        };
 
         const makeMetricCell = (branch, col, val) => {
             const vOk = !(val == null || isNaN(val));
@@ -2455,7 +2480,7 @@ function renderInfrastructureSection(data) {
             `<th style="background:hsl(8, 75%, 28%); color:#fff;">Needs Improvement</th>`+
             `</tr></thead><tbody>`+
             rows.map(r => {
-                const rk = overallRank[r.Branch] || null;
+                const rk = getRankForDisplay(r.Branch);
                 return `<tr>`+
                     `<td style="background:#001f3f;color:#fff;padding:8px;text-align:center;font-weight:900;">${rk!=null? `#${rk}`:'-'}</td>`+
                     `<td style="background:#001f3f;color:#fff;padding:8px;">${toEnglishLabel(r.Branch)}</td>`+
@@ -2467,6 +2492,14 @@ function renderInfrastructureSection(data) {
                     `</tr>`;
             }).join('')+
             `</tbody></table></div>`;
+        
+        // Add event listener to filter dropdown
+        if (filterSelect && !filterSelect.dataset.listenerAttached) {
+            filterSelect.dataset.listenerAttached = 'true';
+            filterSelect.addEventListener('change', () => {
+                renderInfrastructureSection(RAW_DATA || {});
+            });
+        }
     }
 }
 
@@ -2592,9 +2625,10 @@ function renderBranchComparisonSection(data) {
                 responsive: true,
                 maintainAspectRatio: false,
                 indexAxis: 'y',
+                layout: { padding: { right: 40 } },
                 scales: { x: { beginAtZero: true, max: 5 } },
                 plugins: {
-                    barValueLabel: { decimals: 2 },
+                    barValueLabel: { decimals: 2, fontSize: 11 },
                     tooltip: {
                         callbacks: {
                             label: (ctx) => {
