@@ -250,6 +250,54 @@ function parseRatingBuckets(distObj) {
     return { exc, good, avg, poor, na, un };
 }
 
+// Sort subjects in the specified order for High School
+function sortSubjects(subjects) {
+    const highSchoolOrder = [
+        'I Language',
+        'II Language',
+        'III Language',
+        'Mathematics',
+        'Physics',
+        'Chemistry',
+        'Biology',
+        'Social Studies'
+    ];
+
+    const prePrimaryOrder = [
+        'Literacy skills( English)',
+        'Numeracy Skills (Math)',
+        'General Awareness',
+        'Second Language (NA for Pre-K)'
+    ];
+
+    const normalize = (s) => String(s).toLowerCase().trim().replace(/\s+/g, ' ');
+    const hsMap = Object.fromEntries(highSchoolOrder.map((s, i) => [normalize(s), i]));
+    const ppMap = Object.fromEntries(prePrimaryOrder.map((s, i) => [normalize(s), i]));
+
+    return subjects.slice().sort((a, b) => {
+        const normA = normalize(a);
+        const normB = normalize(b);
+
+        const hsA = hsMap[normA];
+        const hsB = hsMap[normB];
+        if (hsA !== undefined || hsB !== undefined) {
+            if (hsA !== undefined && hsB !== undefined) return hsA - hsB;
+            if (hsA !== undefined) return -1;
+            return 1;
+        }
+
+        const ppA = ppMap[normA];
+        const ppB = ppMap[normB];
+        if (ppA !== undefined || ppB !== undefined) {
+            if (ppA !== undefined && ppB !== undefined) return ppA - ppB;
+            if (ppA !== undefined) return -1;
+            return 1;
+        }
+
+        return String(a).localeCompare(String(b));
+    });
+}
+
 function bucketCountGet(counts, bucket) {
     if (!counts) return 0;
     if (bucket === 'Excellent') return Number(counts.Excellent) || 0;
@@ -1226,13 +1274,14 @@ function renderOrientationChart(data) {
 function renderSubjectChart(data) {
     const ctx = document.getElementById('subjectChart').getContext('2d');
     const subjects = data.subject_performance || {};
+    const keys = sortSubjects(Object.keys(subjects));
     new Chart(ctx, {
         type: 'radar',
         data: {
-            labels: Object.keys(subjects).map(toEnglishLabel),
+            labels: keys.map(toEnglishLabel),
             datasets: [{
                 label: 'Score',
-                data: Object.values(subjects).map(s => s.average),
+                data: keys.map(k => subjects?.[k]?.average),
                 backgroundColor: 'rgba(118, 75, 162, 0.2)',
                 borderColor: 'rgba(118, 75, 162, 1)',
                 borderWidth: 3
@@ -1597,7 +1646,7 @@ function renderAcademicSection(data) {
     // Subject-wise stacked distribution - use the viewData directly (already filtered by deriveViewData)
     let subj = data.subject_performance || {};
     const subjectsAll = Object.keys(subj);
-    const subjects = subjectsAll.filter(name => {
+    const subjectsFiltered = subjectsAll.filter(name => {
         const dist = subj[name]?.rating_distribution || {};
         let exc=0, good=0, avg=0, poor=0;
         for (const [k, v] of Object.entries(dist)) {
@@ -1621,6 +1670,8 @@ function renderAcademicSection(data) {
         }
         return (exc + good + avg + poor) > 0;
     });
+    // Sort subjects in the specified order
+    const subjects = sortSubjects(subjectsFiltered);
     const displaySubjects = subjects.map(toEnglishLabel);
     // Determine total respondents (overall or branch)
     const totalResp = (data.summary?.total_responses)
@@ -1892,7 +1943,7 @@ function renderAcademicSegmentBlocks() {
 
     segs.forEach((seg, idx) => {
         const subjMap = segMap[seg] || {};
-        const subjects = Object.keys(subjMap).filter(n => {
+        const subjectsFiltered = Object.keys(subjMap).filter(n => {
             const dist = subjMap[n]?.rating_distribution || {};
             let exc=0, good=0, avg=0, poor=0;
             for (const [k, v] of Object.entries(dist)) {
@@ -1916,6 +1967,8 @@ function renderAcademicSegmentBlocks() {
             }
             return (exc + good + avg + poor) > 0;
         });
+        // Sort subjects in the specified order
+        const subjects = sortSubjects(subjectsFiltered);
         if (!subjects.length) return;
 
         const c = card(`${seg} — Subject Performance`);

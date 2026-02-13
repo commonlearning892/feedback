@@ -344,28 +344,61 @@ df[orientation_col] = df[orientation_col].fillna('Unknown').str.strip()
 df[language_col] = df[language_col].fillna('Unknown').str.strip()
 
 # Subject feedback columns (dynamic detection across segments)
-subject_cols = {}
-for col in df.columns:
+def _canonical_subject_name(name_in):
+    s = re.sub(r"\s+", " ", str(name_in or "").strip())
+    low = s.lower()
+
+    if 'literacy' in low and 'english' in low:
+        return 'Literacy skills( English)'
+    if 'numeracy' in low and ('math' in low or 'mathematics' in low):
+        return 'Numeracy Skills (Math)'
+    if 'general' in low and 'awareness' in low:
+        return 'General Awareness'
+    if 'second' in low and 'language' in low:
+        return 'Second Language (NA for Pre-K)'
+
+    norm = re.sub(r"\s+", " ", low).strip()
+    norm = norm.replace('–', '-').replace('—', '-')
+    norm = re.sub(r"\(.*?\)", lambda m: f"({m.group(0)[1:-1].strip()})", norm)
+
+    lookup = {
+        'i language': 'I Language',
+        'ii language': 'II Language',
+        'iii language': 'III Language',
+        'mathematics': 'Mathematics',
+        'physics': 'Physics',
+        'chemistry': 'Chemistry',
+        'biology': 'Biology',
+        'social studies': 'Social Studies',
+        'general science': 'General Science',
+    }
+    if norm in lookup:
+        return lookup[norm]
+
+    return s
+
+
+subject_name_to_cols = {}
+for col in list(df.columns):
     lowc = str(col).lower()
     if 'subject wise feedback' in lowc:
-        # Extract name inside square brackets if present
         m = re.search(r'\[(.*?)\]', str(col))
-        if m:
-            name = m.group(1).strip()
-        else:
-            # Fallback: take text after the keyword
-            name = str(col).split(')', 1)[-1].strip()[:60]
-        # Shorten noisy names
-        name = re.sub(r'\s+', ' ', name)
-        name = name.replace('skills', '').replace(' - ', ' ').strip()
-        # Avoid duplicates
-        base = name if name else 'Subject'
-        key = base
-        i = 2
-        while key in subject_cols:
-            key = f"{base} {i}"
-            i += 1
-        subject_cols[key] = col
+        raw_name = m.group(1).strip() if m else ''
+        canon = _canonical_subject_name(raw_name)
+        if canon:
+            subject_name_to_cols.setdefault(canon, []).append(col)
+
+subject_cols = {}
+for subject_name, cols in subject_name_to_cols.items():
+    if subject_name not in df.columns:
+        df[subject_name] = np.nan
+    for c in cols:
+        if c in df.columns and c != subject_name:
+            df[subject_name] = df[subject_name].where(~df[subject_name].isna(), df[c])
+    drop_cols = [c for c in cols if c in df.columns and c != subject_name]
+    if drop_cols:
+        df.drop(columns=drop_cols, inplace=True)
+    subject_cols[subject_name] = subject_name
 
 # Environment quality columns (shortened names for analysis)
 env_cols = {}
